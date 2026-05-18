@@ -48,28 +48,41 @@ class NotificationService {
   /// Requests notification authorization. Returns true if granted. Silent
   /// failures default to false — we never block the purchase flow on this.
   Future<bool> requestPermission() async {
+    debugPrint('[NotificationService] requestPermission() start');
     if (!_initialized) await init();
     try {
       if (Platform.isIOS || Platform.isMacOS) {
         final ios = _plugin.resolvePlatformSpecificImplementation<
             IOSFlutterLocalNotificationsPlugin>();
-        final granted = await ios?.requestPermissions(
+        if (ios == null) {
+          debugPrint(
+              '[NotificationService] iOS plugin resolved to null — registration problem');
+          return false;
+        }
+        final granted = await ios.requestPermissions(
               alert: true,
               badge: true,
               sound: true,
             ) ??
             false;
+        debugPrint(
+            '[NotificationService] iOS requestPermissions returned $granted '
+            '(no dialog appears if iOS already has a stored answer for this bundle)');
         return granted;
       }
       if (Platform.isAndroid) {
         final android = _plugin.resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
         final granted = await android?.requestNotificationsPermission() ?? true;
+        debugPrint(
+            '[NotificationService] Android requestNotificationsPermission returned $granted');
         return granted;
       }
+      debugPrint(
+          '[NotificationService] unsupported platform — returning false');
       return false;
-    } catch (e) {
-      debugPrint('[NotificationService] requestPermission failed: $e');
+    } catch (e, st) {
+      debugPrint('[NotificationService] requestPermission failed: $e\n$st');
       return false;
     }
   }

@@ -95,6 +95,9 @@ class _PermissionScreenState extends State<PermissionScreen>
     final ps = await PhotoManager.getPermissionState(
       requestOption: _permRequestOption,
     );
+    debugPrint(
+        '[PermissionScreen] initial PhotoManager state=$ps '
+        '(denied-on-mount means iOS already has a stored answer; no dialog will appear)');
     if (!mounted) return;
     setState(() {
       _currentState = ps;
@@ -117,6 +120,7 @@ class _PermissionScreenState extends State<PermissionScreen>
     final ps = await PhotoManager.getPermissionState(
       requestOption: _permRequestOption,
     );
+    debugPrint('[PermissionScreen] recheck after Settings: state=$ps');
     if (!mounted) return;
     if (_isGrantedState(ps)) {
       unawaited(AnalyticsService.instance.track(
@@ -176,6 +180,7 @@ class _PermissionScreenState extends State<PermissionScreen>
         await PhotoManager.getPermissionState(
           requestOption: _permRequestOption,
         );
+    debugPrint('[PermissionScreen] _onContinue preState=$preState');
 
     if (_isDeniedState(preState)) {
       // System will stay silent. Show the denied view so the user has a
@@ -200,9 +205,13 @@ class _PermissionScreenState extends State<PermissionScreen>
     // user's response (Full Access / Limited / Don't Allow) before doing
     // anything else.
     try {
+      debugPrint(
+          '[PermissionScreen] calling PhotoManager.requestPermissionExtend (expect iOS dialog now)');
       final ps = await PhotoManager.requestPermissionExtend(
         requestOption: _permRequestOption,
       );
+      debugPrint(
+          '[PermissionScreen] requestPermissionExtend returned $ps');
       if (!mounted) return;
       setState(() => _currentState = ps);
 
@@ -230,7 +239,9 @@ class _PermissionScreenState extends State<PermissionScreen>
           _showDeniedFallback = true;
         });
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint(
+          '[PermissionScreen] requestPermissionExtend threw: $e\n$st');
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.errorOccurred,
         properties: {

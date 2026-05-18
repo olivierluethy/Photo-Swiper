@@ -133,14 +133,21 @@ class PurchaseService extends ChangeNotifier {
   /// User-cancelled purchases return false without throwing.
   Future<bool> purchase(Package package) async {
     if (!_supportedPlatform) return false;
+    debugPrint(
+        '[PurchaseService] purchase() start id=${package.identifier} type=${package.packageType}');
     try {
       final result = await Purchases.purchasePackage(package);
       _applyCustomerInfo(result);
+      debugPrint(
+          '[PurchaseService] purchase() returned. isPro=$_isPro isInTrial=$_isInTrial');
       return _isPro;
     } on PlatformException catch (e) {
       final code = PurchasesErrorHelper.getErrorCode(e);
-      if (code == PurchasesErrorCode.purchaseCancelledError) return false;
-      debugPrint('[PurchaseService] purchase failed: $code');
+      if (code == PurchasesErrorCode.purchaseCancelledError) {
+        debugPrint('[PurchaseService] purchase() cancelled by user');
+        return false;
+      }
+      debugPrint('[PurchaseService] purchase() failed: $code — ${e.message}');
       rethrow;
     }
   }
@@ -149,17 +156,20 @@ class PurchaseService extends ChangeNotifier {
   /// entitlement was found and applied.
   Future<bool> restore() async {
     if (!_supportedPlatform) return _isPro;
+    debugPrint('[PurchaseService] restore() start');
     try {
       final info = await Purchases.restorePurchases();
       _applyCustomerInfo(info);
+      debugPrint('[PurchaseService] restore() returned. isPro=$_isPro');
       return _isPro;
     } catch (e) {
-      debugPrint('[PurchaseService] restore failed: $e');
+      debugPrint('[PurchaseService] restore() failed: $e');
       return _isPro;
     }
   }
 
   void _onCustomerInfoUpdate(CustomerInfo info) {
+    debugPrint('[PurchaseService] customerInfo listener fired');
     _applyCustomerInfo(info);
   }
 
@@ -167,6 +177,10 @@ class PurchaseService extends ChangeNotifier {
   /// Side-effect: when the entitlement transitions into an active trial we
   /// schedule the single Day-3 reminder (idempotent).
   void _applyCustomerInfo(CustomerInfo info, {bool notify = true}) {
+    final activeKeys = info.entitlements.active.keys.toList();
+    debugPrint(
+        '[PurchaseService] applyCustomerInfo active=$activeKeys looking_for="$entitlementId"');
+
     final ent = info.entitlements.active[entitlementId];
     final isActive = ent != null && ent.isActive;
     final isTrial = isActive && ent.periodType == PeriodType.trial;
@@ -175,6 +189,11 @@ class PurchaseService extends ChangeNotifier {
     final wasTrial = _isInTrial;
     _isPro = isActive;
     _isInTrial = isTrial;
+
+    if (wasPro != _isPro) {
+      debugPrint(
+          '[PurchaseService] isPro transition $wasPro → $_isPro (trial=$_isInTrial)');
+    }
 
     // First time we see a trial activation → persist start + schedule the
     // single reminder. Subsequent updates while in-trial are no-ops because

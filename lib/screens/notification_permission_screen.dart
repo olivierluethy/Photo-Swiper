@@ -66,7 +66,11 @@ class _NotificationPermissionScreenState
       // System dialog. Result drives the accepted/denied event but does
       // not gate the funnel — the user advances either way.
       granted = await NotificationService.instance.requestPermission();
-    } catch (_) {/* silent */}
+      debugPrint(
+          '[NotifPermScreen] requestPermission returned $granted');
+    } catch (e, st) {
+      debugPrint('[NotifPermScreen] requestPermission threw: $e\n$st');
+    }
 
     unawaited(AnalyticsService.instance.track(
       granted

@@ -59,6 +59,10 @@ class _PaywallScreenState extends State<PaywallScreen>
 
   bool _converted = false;
   bool _convertedViaTrial = false;
+  // Set to true the instant we begin _exitOnSuccess, so the listener and
+  // the sync return value can't both fire navigation. Independent from
+  // _converted (which gates analytics + onboarding completion).
+  bool _navigated = false;
   final DateTime _shownAt = DateTime.now();
 
   // Scroll listener: emits at most one paywall_scrolled event per
@@ -86,6 +90,13 @@ class _PaywallScreenState extends State<PaywallScreen>
     AnalyticsService.instance.clearPlansViewed();
     _scrollCtrl.addListener(_onScroll);
 
+    // Defensive: also navigate when PurchaseService flips to isPro via the
+    // async customerInfo listener. Without this, a sandbox/TestFlight race
+    // where Purchases.purchasePackage returns before the entitlement has
+    // settled in CustomerInfo would leave the user stranded on the paywall
+    // even though Apple completed the purchase.
+    _service.addListener(_onPurchaseServiceChanged);
+
     _entry = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -103,6 +114,18 @@ class _PaywallScreenState extends State<PaywallScreen>
 
     _loadOfferings();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // If a prior session / restore left us already entitled, navigate
+      // immediately on the next frame. Only applies to mandatory
+      // presentations — for settings, the user opened this screen
+      // intentionally and should stay.
+      if (_service.isPro && _isMandatory && !_navigated) {
+        debugPrint(
+            '[PaywallScreen] already isPro on mount — auto-exiting (source=${widget.source.name})');
+        _converted = true;
+        _convertedViaTrial = _service.isInTrial;
+        unawaited(_exitOnSuccess());
+        return;
+      }
       _entry.forward();
       final loadMs =
           DateTime.now().difference(_shownAt).inMilliseconds;
@@ -161,11 +184,26 @@ class _PaywallScreenState extends State<PaywallScreen>
         extras: {'source': widget.source.name},
       ));
     }
+    _service.removeListener(_onPurchaseServiceChanged);
     _scrollCtrl.removeListener(_onScroll);
     _scrollCtrl.dispose();
     _entry.dispose();
     _timeline.dispose();
     super.dispose();
+  }
+
+  /// Fires whenever PurchaseService notifies listeners (entitlement change,
+  /// trial transition, offerings refresh, init complete). We only act on
+  /// transitions to isPro and only once.
+  void _onPurchaseServiceChanged() {
+    if (!mounted || _navigated) return;
+    if (_service.isPro) {
+      debugPrint(
+          '[PaywallScreen] async entitlement update — isPro=true, navigating');
+      _converted = true;
+      _convertedViaTrial = _service.isInTrial;
+      unawaited(_exitOnSuccess());
+    }
   }
 
   // ─── Loading ────────────────────────────────────────────────────────────
@@ -241,6 +279,8 @@ class _PaywallScreenState extends State<PaywallScreen>
     final pkg = _selected;
     if (pkg == null) return;
     if (_purchasingId != null || _restoring) return;
+    debugPrint(
+        '[PaywallScreen] subscribe tapped pkg=${pkg.identifier} type=${pkg.packageType} source=${widget.source.name}');
     HapticFeedback.mediumImpact();
     setState(() {
       _purchasingId = pkg.identifier;
@@ -264,6 +304,8 @@ class _PaywallScreenState extends State<PaywallScreen>
 
     try {
       final success = await _service.purchase(pkg);
+      debugPrint(
+          '[PaywallScreen] purchase() returned success=$success service.isPro=${_service.isPro}');
       if (!mounted) return;
       if (success) {
         _converted = true;
@@ -300,10 +342,14 @@ class _PaywallScreenState extends State<PaywallScreen>
           unawaited(NotificationService.instance.requestPermission());
         }
 
-        _exitOnSuccess();
+        unawaited(_exitOnSuccess());
       } else {
         // RevenueCat returns `false` (no exception) when the user dismisses
-        // Apple's StoreKit sheet without paying.
+        // Apple's StoreKit sheet without paying. The async customerInfo
+        // listener (_onPurchaseServiceChanged) may still rescue this if a
+        // late entitlement update arrives after we land here.
+        debugPrint(
+            '[PaywallScreen] purchase returned false — waiting for possible async entitlement update');
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.purchaseCancelled,
           properties: {
@@ -318,7 +364,8 @@ class _PaywallScreenState extends State<PaywallScreen>
         ));
         setState(() => _purchasingId = null);
       }
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[PaywallScreen] purchase threw: $e\n$st');
       if (!mounted) return;
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.errorOccurred,
@@ -339,17 +386,29 @@ class _PaywallScreenState extends State<PaywallScreen>
     }
   }
 
-  void _exitOnSuccess() {
+  /// Idempotent: guarded by [_navigated] so it can be safely invoked from
+  /// both the sync return value of `_service.purchase(...)` and the async
+  /// PurchaseService listener without producing a double-navigation.
+  Future<void> _exitOnSuccess() async {
+    if (_navigated) return;
+    _navigated = true;
+    debugPrint(
+        '[PaywallScreen] _exitOnSuccess source=${widget.source.name} isPro=${_service.isPro}');
+
     if (widget.source == PaywallSource.settings) {
+      if (!mounted) return;
       Navigator.of(context).pop(true);
       return;
     }
     // Onboarding/launch-gate purchases are the *last* step of the funnel.
     // At this point the user has cleared intro, both permission prompts,
     // and chosen a plan — that's the full definition of "onboarded".
-    // Idempotent if already true (e.g. resubscribe via launchGate).
-    unawaited(
-        PreferencesService.instance.setOnboardingComplete(true));
+    // We *await* the persistence write so a fast force-quit immediately
+    // after Tapping confirm can't lose the completion flag.
+    await PreferencesService.instance.setOnboardingComplete(true);
+    debugPrint('[PaywallScreen] onboarding_complete persisted');
+
+    if (!mounted) return;
     final plan = _selected != null ? _tierFor(_selected!) : 'unknown';
     unawaited(AnalyticsService.instance.track(
       AnalyticsEvents.mainAppAccessedAfterPurchase,
@@ -374,7 +433,7 @@ class _PaywallScreenState extends State<PaywallScreen>
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.subscriptionRestored,
       ));
-      _exitOnSuccess();
+      unawaited(_exitOnSuccess());
       return;
     }
     setState(() {
