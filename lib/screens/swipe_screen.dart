@@ -102,7 +102,8 @@ class _SwipeScreenState extends State<SwipeScreen> {
         AnalyticsEvents.cleanupPaused,
         properties: {
           'swipes_completed': _swipesThisSession,
-          'photos_remaining': _items.length - _currentIndex,
+          'photos_remaining_bucket':
+              _bucketCount(_items.length - _currentIndex),
           'mode': widget.mode.name,
         },
       ));
@@ -165,8 +166,11 @@ class _SwipeScreenState extends State<SwipeScreen> {
         AnalyticsEvents.galleryLoadCompleted,
         properties: {
           'mode': widget.mode.name,
-          'photo_count': assets.length,
-          'load_time_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'load_time_ms':
+              DateTime.now().difference(startedAt).inMilliseconds,
+          // Coarse bucket only — actual photo count is treated as
+          // user-identifying / sensitive and is intentionally not logged.
+          'photo_count_bucket': _bucketCount(assets.length),
         },
       ));
 
@@ -179,7 +183,7 @@ class _SwipeScreenState extends State<SwipeScreen> {
       if (items.isNotEmpty) {
         final cleanupProps = <String, Object>{
           'mode': widget.mode.name,
-          'photos_in_session': items.length,
+          'photos_in_session_bucket': _bucketCount(items.length),
         };
         if (widget.mode == SwipeMode.month &&
             widget.month != null &&
@@ -900,6 +904,19 @@ class _SwipeScreenState extends State<SwipeScreen> {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  /// Coarse photo-count bucket. Avoids logging exact counts (which can be
+  /// near-identifying for power users) while still giving the dashboard
+  /// useful segmentation.
+  String _bucketCount(int n) {
+    if (n <= 0) return '0';
+    if (n < 10) return '1-9';
+    if (n < 50) return '10-49';
+    if (n < 200) return '50-199';
+    if (n < 1000) return '200-999';
+    if (n < 5000) return '1000-4999';
+    return '5000+';
   }
 }
 

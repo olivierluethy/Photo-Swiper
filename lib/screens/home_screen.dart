@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../services/media_service.dart';
 import '../services/preferences_service.dart';
@@ -52,6 +53,19 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     unawaited(AnalyticsService.instance.screen('home_screen'));
+    final analytics = AnalyticsService.instance;
+    unawaited(analytics.track(
+      AnalyticsEvents.mainAppLoaded,
+      properties: {
+        'onboarding_completed':
+            PreferencesService.instance.isOnboardingComplete,
+      },
+    ));
+    unawaited(analytics.funnelStep(
+      FunnelSteps.mainApp,
+      event: AnalyticsEvents.funnelStepMainApp,
+      status: 'accessed',
+    ));
     _hydratePrefs();
     _init();
     _consumeNewlyCompleted();

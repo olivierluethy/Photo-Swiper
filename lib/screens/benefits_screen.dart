@@ -82,6 +82,9 @@ class _BenefitsScreenState extends State<BenefitsScreen>
 
   void _onContinue() {
     HapticFeedback.lightImpact();
+    unawaited(AnalyticsService.instance.track(
+      'benefits_continue_tapped',
+    ));
     Navigator.of(context).pushReplacementNamed('/paywall');
   }
 

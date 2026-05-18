@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
+import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../widgets/onboarding_visuals.dart';
 import 'notification_permission_screen.dart';
@@ -23,6 +24,8 @@ class IntroScreen extends StatefulWidget {
 class _IntroScreenState extends State<IntroScreen> {
   final PageController _pageCtrl = PageController();
   int _currentPage = 0;
+  final DateTime _enteredAt = DateTime.now();
+  final Set<int> _slidesViewed = <int>{};
 
   static final List<_SlideData> _pages = [
     _SlideData(
@@ -55,6 +58,15 @@ class _IntroScreenState extends State<IntroScreen> {
   void initState() {
     super.initState();
     unawaited(AnalyticsService.instance.screen('intro_screen'));
+    _emitSlideViewed(0);
+  }
+
+  void _emitSlideViewed(int index) {
+    if (!_slidesViewed.add(index)) return;
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.onboardingSlideViewed,
+      properties: {'slide_number': index + 1},
+    ));
   }
 
   @override
@@ -64,24 +76,51 @@ class _IntroScreenState extends State<IntroScreen> {
   }
 
   void _next() {
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.onboardingContinueTapped,
+      properties: {'slide_number': _currentPage + 1},
+    ));
     if (_currentPage < _pages.length - 1) {
       _pageCtrl.nextPage(
         duration: const Duration(milliseconds: 380),
         curve: Curves.easeInOut,
       );
     } else {
-      _finishOnboarding();
+      _finishOnboarding(skipped: false);
     }
   }
 
-  void _finishOnboarding() {
+  void _finishOnboarding({required bool skipped}) {
     HapticFeedback.lightImpact();
+    final duration = DateTime.now().difference(_enteredAt).inSeconds;
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.onboardingSlidesCompleted,
+      properties: {
+        'total_time_spent': duration,
+        'skipped': skipped,
+        'slides_viewed': _slidesViewed.length,
+      },
+    ));
+    unawaited(AnalyticsService.instance.funnelStep(
+      FunnelSteps.introSlides,
+      event: AnalyticsEvents.funnelStepIntroSlides,
+      status: skipped ? 'skipped' : 'viewed',
+      extras: {'slides_viewed': _slidesViewed.length},
+    ));
     _goToPermissionFlow();
   }
 
   void _skipIntro() {
     HapticFeedback.selectionClick();
-    _goToPermissionFlow();
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.onboardingSkipButtonTapped,
+      properties: {'slide_number': _currentPage + 1},
+    ));
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.onboardingSlideSkipped,
+      properties: {'from_slide_number': _currentPage + 1},
+    ));
+    _finishOnboarding(skipped: true);
   }
 
   void _goToPermissionFlow() {
@@ -156,7 +195,10 @@ class _IntroScreenState extends State<IntroScreen> {
             Expanded(
               child: PageView.builder(
                 controller: _pageCtrl,
-                onPageChanged: (i) => setState(() => _currentPage = i),
+                onPageChanged: (i) {
+                  setState(() => _currentPage = i);
+                  _emitSlideViewed(i);
+                },
                 itemCount: _pages.length,
                 itemBuilder: (_, i) => _SlidePage(
                   data: _pages[i],

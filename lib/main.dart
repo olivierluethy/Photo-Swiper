@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 
 import 'screens/benefits_screen.dart';
 import 'screens/intro_screen.dart';
@@ -19,10 +17,6 @@ import 'services/preferences_service.dart';
 import 'services/purchase_service.dart';
 import 'services/review_prompt_service.dart';
 
-/// When the current app session began. Used by [PhotoSwiperApp]'s lifecycle
-/// observer to compute `session_duration_seconds` for `app_backgrounded`.
-final DateTime _appOpenedAt = DateTime.now();
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await PreferencesService.instance.init();
@@ -36,11 +30,8 @@ void main() async {
   // Day-3 trial reminder.
   unawaited(NotificationService.instance.init());
 
-  // Attach non-PII super properties so every event is segmentable by app
-  // version and platform. Non-blocking.
-  unawaited(_registerSuperProperties());
-
   unawaited(AnalyticsService.instance.track(AnalyticsEvents.appOpened));
+  unawaited(AnalyticsService.instance.emitSessionStarted());
 
   // Lock to portrait
   SystemChrome.setPreferredOrientations([
@@ -63,18 +54,6 @@ void main() async {
       ? '/launchgate'
       : '/intro';
   runApp(PhotoSwiperApp(initialRoute: initialRoute));
-}
-
-Future<void> _registerSuperProperties() async {
-  try {
-    final info = await PackageInfo.fromPlatform();
-    await AnalyticsService.instance.setUserProperties({
-      'app_version': info.version,
-      'platform': Platform.isIOS ? 'ios' : 'android',
-    });
-  } catch (_) {
-    // Silent — analytics setup must never crash the app.
-  }
 }
 
 class PhotoSwiperApp extends StatefulWidget {
@@ -101,14 +80,76 @@ class _PhotoSwiperAppState extends State<PhotoSwiperApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final analytics = AnalyticsService.instance;
     if (state == AppLifecycleState.paused) {
-      final seconds = DateTime.now().difference(_appOpenedAt).inSeconds;
-      unawaited(AnalyticsService.instance.track(
-        AnalyticsEvents.appBackgrounded,
-        properties: {'session_duration_seconds': seconds},
-      ));
+      final screen = analytics.currentScreen;
+      unawaited(analytics.track(AnalyticsEvents.appBackgrounded));
+      // Dropoff classification: was the user mid-onboarding, mid-paywall,
+      // or in the app proper? Each path emits a different drop-off event
+      // so dashboard cohorts can filter cleanly without joining sessions.
+      if (screen != null) {
+        if (_onboardingScreens.contains(screen)) {
+          unawaited(analytics.track(
+            AnalyticsEvents.userClosedAppDuringOnboarding,
+            properties: {
+              'which_screen': screen,
+              'time_spent_seconds': _secondsSinceScreenEntered(),
+            },
+          ));
+          unawaited(analytics.dropOff(
+            lastCompletedStep: _lastFunnelStepForOnboarding(screen),
+            reason: FunnelDropOffReason.appClosed,
+            extras: {'which_screen': screen},
+          ));
+        } else if (screen == 'paywall_screen') {
+          unawaited(analytics.track(
+            AnalyticsEvents.userClosedAppDuringPaywall,
+            properties: {
+              'time_spent_on_paywall_seconds':
+                  _secondsSinceScreenEntered(),
+              'plans_viewed': analytics.plansViewed,
+            },
+          ));
+          unawaited(analytics.dropOff(
+            lastCompletedStep: FunnelSteps.permissions,
+            reason: FunnelDropOffReason.appClosed,
+            extras: {'plans_viewed': analytics.plansViewed},
+          ));
+        }
+      }
+      unawaited(analytics.emitSessionEnded(finalScreen: screen));
+    } else if (state == AppLifecycleState.resumed) {
+      // Rotate the session id so the next batch of events is grouped
+      // separately in the dashboard.
+      analytics.rotateSession();
+      unawaited(analytics.emitSessionStarted());
     }
   }
+
+  static const _onboardingScreens = {
+    'intro_screen',
+    'notif_permission_screen',
+    'permission_screen',
+    'benefits_screen',
+  };
+
+  int _lastFunnelStepForOnboarding(String screen) {
+    switch (screen) {
+      case 'intro_screen':
+        return 0; // hasn't yet completed any step
+      case 'notif_permission_screen':
+        return FunnelSteps.introSlides;
+      case 'permission_screen':
+        return FunnelSteps.introSlides;
+      case 'benefits_screen':
+        return FunnelSteps.permissions;
+      default:
+        return 0;
+    }
+  }
+
+  int _secondsSinceScreenEntered() =>
+      AnalyticsService.instance.secondsOnCurrentScreen;
 
   @override
   Widget build(BuildContext context) {

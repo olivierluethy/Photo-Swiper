@@ -61,6 +61,8 @@ class _PermissionScreenState extends State<PermissionScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(AnalyticsService.instance.screen('permission_screen'));
+    unawaited(AnalyticsService.instance
+        .track(AnalyticsEvents.photoPermissionShown));
     _entry = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 420),
@@ -118,11 +120,14 @@ class _PermissionScreenState extends State<PermissionScreen>
     if (!mounted) return;
     if (_isGrantedState(ps)) {
       unawaited(AnalyticsService.instance.track(
-        AnalyticsEvents.photoPermissionGranted,
+        AnalyticsEvents.photoPermissionAccepted,
         properties: const {'source': 'settings_return'},
       ));
       HapticFeedback.lightImpact();
-      _advance();
+      _advance(
+        funnelStatus:
+            ps == PermissionState.limited ? 'partially_granted' : 'granted',
+      );
     } else {
       setState(() => _currentState = ps);
     }
@@ -134,8 +139,18 @@ class _PermissionScreenState extends State<PermissionScreen>
   bool _isDeniedState(PermissionState ps) =>
       ps == PermissionState.denied || ps == PermissionState.restricted;
 
-  void _advance() {
-    // Step 2 was photos; on to the benefits showcase.
+  void _advance({String funnelStatus = 'granted'}) {
+    // Step 2 was photos; on to the benefits showcase. Emit both the
+    // section-completed marker and the funnel-step event so the dashboard
+    // can answer "how many users finished both permissions?" in one query.
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.permissionsSectionCompleted,
+    ));
+    unawaited(AnalyticsService.instance.funnelStep(
+      FunnelSteps.permissions,
+      event: AnalyticsEvents.funnelStepPermissions,
+      status: funnelStatus,
+    ));
     Navigator.of(context).pushReplacementNamed('/benefits');
   }
 
@@ -177,7 +192,7 @@ class _PermissionScreenState extends State<PermissionScreen>
     }
 
     if (_isGrantedState(preState)) {
-      _advance();
+      _advance(funnelStatus: 'granted');
       return;
     }
 
@@ -193,7 +208,7 @@ class _PermissionScreenState extends State<PermissionScreen>
 
       if (_isGrantedState(ps)) {
         unawaited(AnalyticsService.instance.track(
-          AnalyticsEvents.photoPermissionGranted,
+          AnalyticsEvents.photoPermissionAccepted,
           properties: {
             'source': 'prompt',
             'level':
@@ -201,7 +216,11 @@ class _PermissionScreenState extends State<PermissionScreen>
           },
         ));
         HapticFeedback.lightImpact();
-        _advance();
+        _advance(
+          funnelStatus: ps == PermissionState.limited
+              ? 'partially_granted'
+              : 'granted',
+        );
       } else {
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.photoPermissionDenied,
@@ -236,7 +255,7 @@ class _PermissionScreenState extends State<PermissionScreen>
 
   void _continueDespiteDenial() {
     HapticFeedback.selectionClick();
-    _advance();
+    _advance(funnelStatus: 'denied');
   }
 
   @override

@@ -61,6 +61,13 @@ class _PaywallScreenState extends State<PaywallScreen>
   bool _convertedViaTrial = false;
   final DateTime _shownAt = DateTime.now();
 
+  // Scroll listener: emits at most one paywall_scrolled event per
+  // direction-change so we don't flood the dashboard with one event per
+  // pixel of drag.
+  final ScrollController _scrollCtrl = ScrollController();
+  double _lastScrollOffset = 0;
+  String? _lastScrollDirection;
+
   late final AnimationController _entry;
   late final Animation<double> _fade;
   late final Animation<Offset> _slide;
@@ -76,10 +83,8 @@ class _PaywallScreenState extends State<PaywallScreen>
   void initState() {
     super.initState();
     unawaited(AnalyticsService.instance.screen('paywall_screen'));
-    unawaited(AnalyticsService.instance.track(
-      AnalyticsEvents.paywallShown,
-      properties: {'source': widget.source.name},
-    ));
+    AnalyticsService.instance.clearPlansViewed();
+    _scrollCtrl.addListener(_onScroll);
 
     _entry = AnimationController(
       vsync: this,
@@ -99,6 +104,21 @@ class _PaywallScreenState extends State<PaywallScreen>
     _loadOfferings();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _entry.forward();
+      final loadMs =
+          DateTime.now().difference(_shownAt).inMilliseconds;
+      unawaited(AnalyticsService.instance.track(
+        AnalyticsEvents.paywallViewed,
+        properties: {
+          'source': widget.source.name,
+          'screen_load_time_ms': loadMs,
+        },
+      ));
+      unawaited(AnalyticsService.instance.funnelStep(
+        FunnelSteps.paywall,
+        event: AnalyticsEvents.funnelStepPaywall,
+        status: 'viewed',
+        extras: {'source': widget.source.name},
+      ));
       // Slight delay so the timeline plays once the page has settled,
       // making the progression feel intentional rather than racing the
       // page transition.
@@ -108,18 +128,41 @@ class _PaywallScreenState extends State<PaywallScreen>
     });
   }
 
+  void _onScroll() {
+    final offset = _scrollCtrl.offset;
+    final delta = offset - _lastScrollOffset;
+    if (delta.abs() < 12) return; // ignore micro-jitter
+    final dir = delta > 0 ? 'down' : 'up';
+    _lastScrollOffset = offset;
+    if (dir == _lastScrollDirection) return;
+    _lastScrollDirection = dir;
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.paywallScrolled,
+      properties: {'direction': dir, 'offset': offset.toInt()},
+    ));
+  }
+
   @override
   void dispose() {
     if (!_converted) {
       final seconds = DateTime.now().difference(_shownAt).inSeconds;
       unawaited(AnalyticsService.instance.track(
-        AnalyticsEvents.paywallDismissed,
+        AnalyticsEvents.paywallClosedWithoutPurchase,
         properties: {
-          'seconds_visible': seconds,
+          'time_spent_on_paywall_seconds': seconds,
           'source': widget.source.name,
+          'plans_viewed': AnalyticsService.instance.plansViewed,
         },
       ));
+      unawaited(AnalyticsService.instance.funnelStep(
+        FunnelSteps.purchase,
+        event: AnalyticsEvents.funnelStepPurchase,
+        status: 'abandoned',
+        extras: {'source': widget.source.name},
+      ));
     }
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
     _entry.dispose();
     _timeline.dispose();
     super.dispose();
@@ -167,6 +210,13 @@ class _PaywallScreenState extends State<PaywallScreen>
     if (pkg.packageType == PackageType.weekly && wasYearly) {
       _timeline.forward(from: 0);
     }
+    final isWeekly = pkg.packageType == PackageType.weekly;
+    AnalyticsService.instance.notePlanViewed(isWeekly ? 'weekly' : 'yearly');
+    unawaited(AnalyticsService.instance.track(
+      isWeekly
+          ? AnalyticsEvents.weeklyPlanTapped
+          : AnalyticsEvents.yearlyPlanTapped,
+    ));
   }
 
   bool get _isWeeklySelected =>
@@ -199,6 +249,19 @@ class _PaywallScreenState extends State<PaywallScreen>
 
     final framedAsTrial = pkg.packageType == PackageType.weekly;
 
+    // Apple's native StoreKit dialog appears as a result of the
+    // `purchasePackage` call below. The dashboard distinguishes between
+    // "tapped a plan tile" and "saw Apple's confirmation sheet" using
+    // these dedicated events.
+    unawaited(AnalyticsService.instance.track(
+      framedAsTrial
+          ? AnalyticsEvents.weeklyPlanAppleDialogShown
+          : AnalyticsEvents.yearlyPlanAppleDialogShown,
+      properties: {
+        'currency_code': pkg.storeProduct.currencyCode,
+      },
+    ));
+
     try {
       final success = await _service.purchase(pkg);
       if (!mounted) return;
@@ -206,16 +269,30 @@ class _PaywallScreenState extends State<PaywallScreen>
         _converted = true;
         _convertedViaTrial = _service.isInTrial;
 
+        final tier = _tierFor(pkg);
+        final commonPurchaseProps = <String, Object>{
+          'tier': tier,
+          'framed_as_trial': framedAsTrial,
+          'in_trial': _service.isInTrial,
+          'purchase_price': pkg.storeProduct.price,
+          'currency': pkg.storeProduct.currencyCode,
+          'source': widget.source.name,
+        };
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.subscriptionStarted,
-          properties: {
-            'tier': _tierFor(pkg),
-            'framed_as_trial': framedAsTrial,
-            'in_trial': _service.isInTrial,
-            'price': pkg.storeProduct.price,
-            'currency_code': pkg.storeProduct.currencyCode,
-            'source': widget.source.name,
-          },
+          properties: commonPurchaseProps,
+        ));
+        unawaited(AnalyticsService.instance.track(
+          framedAsTrial
+              ? AnalyticsEvents.weeklyPlanPurchased
+              : AnalyticsEvents.yearlyPlanPurchased,
+          properties: commonPurchaseProps,
+        ));
+        unawaited(AnalyticsService.instance.funnelStep(
+          FunnelSteps.purchase,
+          event: AnalyticsEvents.funnelStepPurchase,
+          status: 'completed',
+          extras: {'plan_type': tier},
         ));
         HapticFeedback.heavyImpact();
 
@@ -225,10 +302,36 @@ class _PaywallScreenState extends State<PaywallScreen>
 
         _exitOnSuccess();
       } else {
+        // RevenueCat returns `false` (no exception) when the user dismisses
+        // Apple's StoreKit sheet without paying.
+        unawaited(AnalyticsService.instance.track(
+          AnalyticsEvents.purchaseCancelled,
+          properties: {
+            'plan_type': framedAsTrial ? 'weekly' : 'yearly',
+            'source': widget.source.name,
+          },
+        ));
+        unawaited(AnalyticsService.instance.dropOff(
+          lastCompletedStep: FunnelSteps.paywall,
+          reason: FunnelDropOffReason.paymentCancelled,
+          extras: {'plan_type': framedAsTrial ? 'weekly' : 'yearly'},
+        ));
         setState(() => _purchasingId = null);
       }
     } catch (_) {
       if (!mounted) return;
+      unawaited(AnalyticsService.instance.track(
+        AnalyticsEvents.errorOccurred,
+        properties: {
+          'context': 'paywall_purchase',
+          'plan_type': framedAsTrial ? 'weekly' : 'yearly',
+        },
+      ));
+      unawaited(AnalyticsService.instance.dropOff(
+        lastCompletedStep: FunnelSteps.paywall,
+        reason: FunnelDropOffReason.purchaseFailed,
+        extras: {'plan_type': framedAsTrial ? 'weekly' : 'yearly'},
+      ));
       setState(() {
         _purchasingId = null;
         _errorMessage = 'Purchase could not be completed. Please try again.';
@@ -247,6 +350,11 @@ class _PaywallScreenState extends State<PaywallScreen>
     // Idempotent if already true (e.g. resubscribe via launchGate).
     unawaited(
         PreferencesService.instance.setOnboardingComplete(true));
+    final plan = _selected != null ? _tierFor(_selected!) : 'unknown';
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.mainAppAccessedAfterPurchase,
+      properties: {'plan_type': plan, 'source': widget.source.name},
+    ));
     Navigator.of(context).pushReplacementNamed('/home');
   }
 
@@ -330,6 +438,7 @@ class _PaywallScreenState extends State<PaywallScreen>
 
   Widget _buildScroll() {
     return ListView(
+      controller: _scrollCtrl,
       padding: const EdgeInsets.fromLTRB(22, 20, 22, 28),
       physics: const BouncingScrollPhysics(),
       children: [

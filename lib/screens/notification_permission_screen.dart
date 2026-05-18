@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../services/notification_service.dart';
 
@@ -36,6 +37,8 @@ class _NotificationPermissionScreenState
   void initState() {
     super.initState();
     unawaited(AnalyticsService.instance.screen('notif_permission_screen'));
+    unawaited(AnalyticsService.instance
+        .track(AnalyticsEvents.notificationPermissionShown));
     _entry = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 420),
@@ -58,14 +61,18 @@ class _NotificationPermissionScreenState
     if (_requesting) return;
     setState(() => _requesting = true);
 
+    bool granted = false;
     try {
-      // System dialog. Result is intentionally ignored — the user is
-      // advanced to the paywall either way.
-      await NotificationService.instance.requestPermission();
-    } catch (_) {
-      // Silent — analytics layer logs nothing here, and a failed system
-      // dialog must never block the funnel.
-    }
+      // System dialog. Result drives the accepted/denied event but does
+      // not gate the funnel — the user advances either way.
+      granted = await NotificationService.instance.requestPermission();
+    } catch (_) {/* silent */}
+
+    unawaited(AnalyticsService.instance.track(
+      granted
+          ? AnalyticsEvents.notificationPermissionAccepted
+          : AnalyticsEvents.notificationPermissionDenied,
+    ));
 
     if (!mounted) return;
     HapticFeedback.lightImpact();
