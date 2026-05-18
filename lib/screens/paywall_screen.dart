@@ -9,19 +9,23 @@ import '../services/analytics_service.dart';
 import '../services/notification_service.dart';
 import '../services/purchase_service.dart';
 
-/// FlickClean's premium paywall. Two plans, no monthly:
+/// FlickClean's mandatory trial paywall.
 ///
-///   • Weekly  — billed every 7 days, includes a 3-day free trial
-///   • Yearly  — billed upfront, biggest savings (shown as "BEST VALUE")
+/// Layout, top → bottom:
+///   1. Hero copy framing the 3-day free trial
+///   2. Vertical animated timeline showing Day 1 / Day 2 / Day 3
+///   3. Two plan tiles. Tapping a tile is the purchase action — no
+///      separate Continue button. The tap calls
+///      `Purchases.purchasePackage(...)`, which surfaces Apple's native
+///      StoreKit confirmation sheet (with the intro-offer details Apple
+///      auto-renders from App Store Connect). On success we replace the
+///      route stack with /home.
 ///
-/// In the onboarding flow this paywall is mandatory: there is no close
-/// button and the system back gesture is blocked. The only way out is a
-/// successful purchase or restore. From `PaywallSource.settings` we honour
-/// a back gesture / close button so existing subscribers can browse the
-/// screen without being trapped.
+/// Onboarding/launch-gate presentations are blocking — no close button,
+/// no back gesture. From `PaywallSource.settings` we honour close + pop.
 class PaywallScreen extends StatefulWidget {
-  /// Where the paywall is being presented from. Drives analytics + whether
-  /// the close button + back gesture are enabled.
+  /// Where the paywall is being presented from. Drives analytics and
+  /// whether the close button + back gesture are enabled.
   final PaywallSource source;
 
   const PaywallScreen({
@@ -36,13 +40,12 @@ class PaywallScreen extends StatefulWidget {
 enum PaywallSource { onboarding, launchGate, settings }
 
 class _PaywallScreenState extends State<PaywallScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   final _service = PurchaseService.instance;
 
   Offering? _offering;
-  Package? _selected;
   bool _loadingOfferings = true;
-  bool _purchasing = false;
+  String? _purchasingId;
   bool _restoring = false;
   String? _errorMessage;
 
@@ -53,14 +56,13 @@ class _PaywallScreenState extends State<PaywallScreen>
   late final AnimationController _entry;
   late final Animation<double> _fade;
   late final Animation<Offset> _slide;
+  late final AnimationController _timeline;
 
   // ─── Design tokens ──────────────────────────────────────────────────────
   static const Color _bg = Color(0xFF0D0D0D);
-  static const Color _surface = Color(0xFF15151A);
   static const Color _accent = Color(0xFF6B4EFF);
   static const Color _accentSoft = Color(0xFF8B7BFF);
   static const Color _muted = Color(0xFF8E8E93);
-  static const Color _privacy = Color(0xFF0A84FF);
 
   @override
   void initState() {
@@ -81,8 +83,21 @@ class _PaywallScreenState extends State<PaywallScreen>
       end: Offset.zero,
     ).animate(CurvedAnimation(parent: _entry, curve: Curves.easeOutCubic));
 
+    _timeline = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+
     _loadOfferings();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _entry.forward());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _entry.forward();
+      // Slight delay so the timeline plays once the page has settled,
+      // making the progression feel intentional rather than racing the
+      // page transition.
+      Future<void>.delayed(const Duration(milliseconds: 220), () {
+        if (mounted) _timeline.forward();
+      });
+    });
   }
 
   @override
@@ -98,6 +113,7 @@ class _PaywallScreenState extends State<PaywallScreen>
       ));
     }
     _entry.dispose();
+    _timeline.dispose();
     super.dispose();
   }
 
@@ -107,7 +123,6 @@ class _PaywallScreenState extends State<PaywallScreen>
     if (cached != null && (cached.weekly != null || cached.annual != null)) {
       setState(() {
         _offering = cached;
-        _selected = _defaultSelection(cached);
         _loadingOfferings = false;
       });
       return;
@@ -116,21 +131,12 @@ class _PaywallScreenState extends State<PaywallScreen>
     if (!mounted) return;
     setState(() {
       _offering = fetched;
-      _selected =
-          fetched != null ? _defaultSelection(fetched) : null;
       _loadingOfferings = false;
       if (fetched == null ||
           (fetched.weekly == null && fetched.annual == null)) {
         _errorMessage = _describeOfferingProblem();
       }
     });
-  }
-
-  /// Default to weekly (lowest friction; trial-eligible) and visually
-  /// emphasise yearly as the "Best Value" — matches the high-conversion
-  /// pattern used across the category.
-  Package? _defaultSelection(Offering offering) {
-    return offering.weekly ?? offering.annual;
   }
 
   String _describeOfferingProblem() {
@@ -144,13 +150,15 @@ class _PaywallScreenState extends State<PaywallScreen>
   }
 
   // ─── Purchase ───────────────────────────────────────────────────────────
-  Future<void> _onPurchasePressed() async {
-    final pkg = _selected;
-    if (pkg == null || _purchasing) return;
-
+  // Tapping a plan tile is itself the purchase action. We dispatch
+  // straight into RevenueCat, which raises Apple's native StoreKit sheet —
+  // that sheet is what shows "3 days free, then $X" and collects the
+  // confirmation. We don't simulate Apple's UI in our own.
+  Future<void> _purchase(Package pkg) async {
+    if (_purchasingId != null || _restoring) return;
     HapticFeedback.mediumImpact();
     setState(() {
-      _purchasing = true;
+      _purchasingId = pkg.identifier;
       _errorMessage = null;
     });
 
@@ -161,7 +169,7 @@ class _PaywallScreenState extends State<PaywallScreen>
       if (!mounted) return;
       if (success) {
         _converted = true;
-        _convertedViaTrial = framedAsTrial && _service.isInTrial;
+        _convertedViaTrial = _service.isInTrial;
 
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.subscriptionStarted,
@@ -182,20 +190,17 @@ class _PaywallScreenState extends State<PaywallScreen>
 
         _exitOnSuccess();
       } else {
-        setState(() => _purchasing = false);
+        setState(() => _purchasingId = null);
       }
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _purchasing = false;
+        _purchasingId = null;
         _errorMessage = 'Purchase could not be completed. Please try again.';
       });
     }
   }
 
-  /// Where to go once a purchase / restore succeeds. In the onboarding
-  /// flow the paywall is the final gate before /home, so we replace the
-  /// route stack. From settings, we just pop the modal back to the caller.
   void _exitOnSuccess() {
     if (widget.source == PaywallSource.settings) {
       Navigator.of(context).pop(true);
@@ -207,7 +212,7 @@ class _PaywallScreenState extends State<PaywallScreen>
   bool get _isMandatory => widget.source != PaywallSource.settings;
 
   Future<void> _onRestorePressed() async {
-    if (_purchasing || _restoring) return;
+    if (_purchasingId != null || _restoring) return;
     HapticFeedback.selectionClick();
     setState(() {
       _restoring = true;
@@ -250,9 +255,6 @@ class _PaywallScreenState extends State<PaywallScreen>
   // ─── Build ──────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    // Mandatory onboarding paywall: PopScope blocks Android back + iOS
-    // edge-swipe; no close button is rendered. From Settings we keep the
-    // close button + back gesture so existing subscribers can browse.
     return PopScope(
       canPop: !_isMandatory,
       child: Scaffold(
@@ -287,22 +289,17 @@ class _PaywallScreenState extends State<PaywallScreen>
 
   Widget _buildScroll() {
     return ListView(
-      padding: const EdgeInsets.fromLTRB(22, 16, 22, 32),
+      padding: const EdgeInsets.fromLTRB(22, 20, 22, 28),
       physics: const BouncingScrollPhysics(),
       children: [
         const SizedBox(height: 8),
         _buildHero(),
-        const SizedBox(height: 24),
-        _buildValueProps(),
-        const SizedBox(height: 16),
-        _buildPrivacyCallout(),
-        const SizedBox(height: 24),
+        const SizedBox(height: 26),
+        _Timeline(controller: _timeline),
+        const SizedBox(height: 28),
         _buildPlans(),
-        const SizedBox(height: 12),
-        _buildTrialHighlight(),
+        const SizedBox(height: 16),
         _buildErrorBanner(),
-        _buildPrimaryCta(),
-        const SizedBox(height: 14),
         _buildTrustRow(),
         const SizedBox(height: 14),
         _buildFinePrint(),
@@ -315,8 +312,8 @@ class _PaywallScreenState extends State<PaywallScreen>
     return Column(
       children: [
         Container(
-          width: 72,
-          height: 72,
+          width: 70,
+          height: 70,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             gradient: const LinearGradient(
@@ -333,29 +330,29 @@ class _PaywallScreenState extends State<PaywallScreen>
             ],
           ),
           child: const Icon(Icons.auto_awesome_rounded,
-              color: Colors.white, size: 34),
+              color: Colors.white, size: 32),
         ),
         const SizedBox(height: 18),
         const Text(
-          'Unlock FlickClean Premium',
+          'Try FlickClean free\nfor 3 days',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.white,
             fontSize: 26,
             fontWeight: FontWeight.w700,
-            height: 1.1,
+            height: 1.15,
             letterSpacing: -0.4,
           ),
         ),
         const SizedBox(height: 8),
         const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 6),
+          padding: EdgeInsets.symmetric(horizontal: 8),
           child: Text(
-            'Clean your library calmly, beautifully, and entirely on your own device.',
+            "Here's how your trial works. Cancel anytime — no questions asked.",
             textAlign: TextAlign.center,
             style: TextStyle(
               color: _muted,
-              fontSize: 14.5,
+              fontSize: 14,
               height: 1.45,
             ),
           ),
@@ -364,102 +361,11 @@ class _PaywallScreenState extends State<PaywallScreen>
     );
   }
 
-  // ─── Value props ────────────────────────────────────────────────────────
-  Widget _buildValueProps() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-      decoration: BoxDecoration(
-        color: _surface,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: const Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _ValueRow(
-            icon: Icons.all_inclusive_rounded,
-            title: 'Unlimited photo swiping',
-            subtitle: 'Sort your entire library — no daily caps.',
-          ),
-          SizedBox(height: 14),
-          _ValueRow(
-            icon: Icons.flash_on_rounded,
-            title: 'Faster cleanup',
-            subtitle: 'Smart previews and instant batching.',
-          ),
-          SizedBox(height: 14),
-          _ValueRow(
-            icon: Icons.sd_storage_rounded,
-            title: 'Free up gigabytes',
-            subtitle: 'See exactly how much space you reclaim.',
-          ),
-          SizedBox(height: 14),
-          _ValueRow(
-            icon: Icons.workspace_premium_rounded,
-            title: 'Every new tool we ship',
-            subtitle: 'All future features included.',
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ─── Privacy callout ────────────────────────────────────────────────────
-  Widget _buildPrivacyCallout() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(
-        color: _privacy.withOpacity(0.10),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _privacy.withOpacity(0.26), width: 1),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: _privacy.withOpacity(0.18),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(Icons.shield_rounded,
-                color: _privacy, size: 18),
-          ),
-          const SizedBox(width: 11),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '100% on-device privacy',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 14.5,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                SizedBox(height: 3),
-                Text(
-                  'No cloud uploads. Your photos never leave your phone.',
-                  style: TextStyle(
-                    color: Color(0xFFBFC1C6),
-                    fontSize: 12.5,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   // ─── Plans ──────────────────────────────────────────────────────────────
   Widget _buildPlans() {
     if (_loadingOfferings) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 32),
+        padding: EdgeInsets.symmetric(vertical: 28),
         child: Center(child: CircularProgressIndicator(color: _accent)),
       );
     }
@@ -501,40 +407,33 @@ class _PaywallScreenState extends State<PaywallScreen>
       children: [
         if (annual != null)
           _PlanTile(
-            title: 'Yearly',
-            priceLabel: annual.storeProduct.priceString,
-            cadence: 'per year',
-            sublabel: _perWeekFromAnnual(annual) != null
-                ? '${_perWeekFromAnnual(annual)} per week · billed upfront'
-                : 'billed upfront',
-            badge: savings != null ? 'BEST VALUE · SAVE $savings%' : 'BEST VALUE',
-            selected: _selected?.identifier == annual.identifier,
+            label: 'Yearly',
+            priceTagline: '3 days free, then ${annual.storeProduct.priceString} / year',
+            secondaryTagline: _perWeekFromAnnual(annual) != null
+                ? 'Just ${_perWeekFromAnnual(annual)} / week'
+                : null,
+            badge: savings != null
+                ? 'BEST VALUE · SAVE $savings%'
+                : 'BEST VALUE',
             highlight: true,
-            onTap: () {
-              HapticFeedback.selectionClick();
-              setState(() => _selected = annual);
-            },
+            loading: _purchasingId == annual.identifier,
+            anyLoading: _purchasingId != null || _restoring,
+            onTap: () => _purchase(annual),
           ),
         if (weekly != null && annual != null) const SizedBox(height: 10),
         if (weekly != null)
           _PlanTile(
-            title: 'Weekly',
-            priceLabel: weekly.storeProduct.priceString,
-            cadence: 'per week',
-            sublabel: '3-day free trial included',
-            selected: _selected?.identifier == weekly.identifier,
+            label: 'Weekly',
+            priceTagline: '3 days free, then ${weekly.storeProduct.priceString} / week',
             highlight: false,
-            onTap: () {
-              HapticFeedback.selectionClick();
-              setState(() => _selected = weekly);
-            },
+            loading: _purchasingId == weekly.identifier,
+            anyLoading: _purchasingId != null || _restoring,
+            onTap: () => _purchase(weekly),
           ),
       ],
     );
   }
 
-  /// Returns the % saved on yearly vs paying weekly for a full year.
-  /// Null if either price is missing or yearly isn't actually cheaper.
   int? _yearlySavingsPercent(Package? weekly, Package? annual) {
     if (weekly == null || annual == null) return null;
     final weeklyPrice = weekly.storeProduct.price;
@@ -554,74 +453,6 @@ class _PaywallScreenState extends State<PaywallScreen>
     return '$code ${perWeek.toStringAsFixed(2)}';
   }
 
-  // ─── Trial highlight ────────────────────────────────────────────────────
-  // Pops in when weekly is the selected plan; quietly disappears for yearly.
-  // Spells out the deal in confident, calm language right above the CTA so
-  // the trial terms are unmissable.
-  Widget _buildTrialHighlight() {
-    final isWeekly = _selected?.packageType == PackageType.weekly;
-    final priceLabel = _selected?.storeProduct.priceString ?? '';
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOut,
-      alignment: Alignment.topCenter,
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 220),
-        child: isWeekly
-            ? Padding(
-                key: const ValueKey('weekly-trial'),
-                padding: const EdgeInsets.only(bottom: 14),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 11),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF30D158).withOpacity(0.10),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: const Color(0xFF30D158).withOpacity(0.35),
-                      width: 1,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.celebration_rounded,
-                          color: Color(0xFF30D158), size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text.rich(
-                          TextSpan(
-                            style: const TextStyle(
-                              color: Color(0xFFD7E9DC),
-                              fontSize: 12.5,
-                              height: 1.45,
-                            ),
-                            children: [
-                              const TextSpan(
-                                text: 'Free for 3 days. ',
-                                style: TextStyle(
-                                  color: Color(0xFF7BEFA0),
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              TextSpan(
-                                text: 'After your trial, '
-                                    '${priceLabel.isEmpty ? "weekly billing" : "$priceLabel/week"} '
-                                    'starts automatically. Cancel anytime.',
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            : const SizedBox.shrink(key: ValueKey('no-trial')),
-      ),
-    );
-  }
-
-  // ─── CTA ────────────────────────────────────────────────────────────────
   Widget _buildErrorBanner() {
     if (_errorMessage == null) return const SizedBox.shrink();
     return Padding(
@@ -634,53 +465,6 @@ class _PaywallScreenState extends State<PaywallScreen>
     );
   }
 
-  Widget _buildPrimaryCta() {
-    final canPurchase = _selected != null && !_purchasing && !_restoring;
-    final framedAsTrial =
-        _selected?.packageType == PackageType.weekly;
-    final label = framedAsTrial
-        ? 'Start 3-Day Free Trial'
-        : 'Subscribe Yearly';
-
-    return SizedBox(
-      width: double.infinity,
-      height: 56,
-      child: ElevatedButton(
-        onPressed: canPurchase ? _onPurchasePressed : null,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: _accent,
-          disabledBackgroundColor: _accent.withOpacity(0.4),
-          foregroundColor: Colors.white,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          elevation: 0,
-        ),
-        child: _purchasing
-            ? const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  color: Colors.white,
-                  strokeWidth: 2.4,
-                ),
-              )
-            : AnimatedSwitcher(
-                duration: const Duration(milliseconds: 220),
-                child: Text(
-                  label,
-                  key: ValueKey(label),
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-      ),
-    );
-  }
-
-  // ─── Trust row ──────────────────────────────────────────────────────────
   Widget _buildTrustRow() {
     return const Row(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -696,19 +480,14 @@ class _PaywallScreenState extends State<PaywallScreen>
     );
   }
 
-  // ─── Fine print ─────────────────────────────────────────────────────────
   Widget _buildFinePrint() {
-    final framedAsTrial =
-        _selected?.packageType == PackageType.weekly;
-    final summary = framedAsTrial
-        ? 'Free for 3 days, then renews weekly until cancelled.'
-        : 'Billed upfront yearly, renews each year until cancelled.';
     return Column(
       children: [
-        Text(
-          '$summary Cancel anytime in your Apple account settings.',
+        const Text(
+          'Free for 3 days, then your chosen plan renews automatically until you cancel. '
+          'Cancel anytime in your Apple account settings.',
           textAlign: TextAlign.center,
-          style: const TextStyle(color: _muted, fontSize: 11.5, height: 1.45),
+          style: TextStyle(color: _muted, fontSize: 11.5, height: 1.45),
         ),
         const SizedBox(height: 10),
         Row(
@@ -736,25 +515,272 @@ class _PaywallScreenState extends State<PaywallScreen>
   }
 }
 
+// ─── Timeline ─────────────────────────────────────────────────────────────────
+//
+// Vertical "Day 1 → Day 2 → Day 3" reveal. A single AnimationController is
+// driven from 0 → 1; the connecting rail grows continuously, and each row
+// fades in at a staggered interval so the progression reads like a story.
+class _Timeline extends StatelessWidget {
+  final AnimationController controller;
+  const _Timeline({required this.controller});
+
+  static const Color _accent = Color(0xFF6B4EFF);
+  static const Color _check = Color(0xFF30D158);
+  static const Color _warm = Color(0xFFFFD60A);
+  static const Color _railIdle = Color(0xFF2C2C2E);
+
+  static const List<_Step> _steps = [
+    _Step(
+      tag: 'Day 1',
+      title: 'Free',
+      body: 'No payment required — full access from the moment you tap below.',
+      icon: Icons.lock_open_rounded,
+      color: _check,
+    ),
+    _Step(
+      tag: 'Day 2',
+      title: 'Enjoy Unlimited',
+      body: 'Every feature stays unlocked. Zero limitations, zero gotchas.',
+      icon: Icons.all_inclusive_rounded,
+      color: _accent,
+    ),
+    _Step(
+      tag: 'Day 3',
+      title: 'Trial Ends',
+      body: 'Your subscription begins — only if you decide to continue.',
+      icon: Icons.event_available_rounded,
+      color: _warm,
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (_, __) {
+        final t = controller.value;
+        return CustomPaint(
+          painter: _TimelineRailPainter(
+            progress: t,
+            stops: _steps.length,
+            activeColor: _accent.withOpacity(0.85),
+            idleColor: _railIdle,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 0),
+            child: Column(
+              children: [
+                for (int i = 0; i < _steps.length; i++) ...[
+                  _TimelineRow(
+                    step: _steps[i],
+                    index: i,
+                    total: _steps.length,
+                    progress: t,
+                  ),
+                  if (i < _steps.length - 1) const SizedBox(height: 18),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Step {
+  final String tag;
+  final String title;
+  final String body;
+  final IconData icon;
+  final Color color;
+  const _Step({
+    required this.tag,
+    required this.title,
+    required this.body,
+    required this.icon,
+    required this.color,
+  });
+}
+
+class _TimelineRow extends StatelessWidget {
+  final _Step step;
+  final int index;
+  final int total;
+  final double progress;
+
+  const _TimelineRow({
+    required this.step,
+    required this.index,
+    required this.total,
+    required this.progress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Stagger: each row owns a slice of the [0, 1] progress range and
+    // fades + slides in over its slice.
+    final slice = 1.0 / total;
+    final start = index * slice;
+    final localT =
+        ((progress - start) / slice).clamp(0.0, 1.0);
+    final fade = Curves.easeOut.transform(localT);
+    final slideY = (1 - fade) * 12;
+    final active = localT > 0.05;
+
+    return Opacity(
+      opacity: fade,
+      child: Transform.translate(
+        offset: Offset(0, slideY),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _Dot(active: active, color: step.color, icon: step.icon),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          step.tag,
+                          style: TextStyle(
+                            color: step.color,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(Icons.arrow_right_alt_rounded,
+                            color: Color(0xFF3A3A3C), size: 16),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            step.title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      step.body,
+                      style: const TextStyle(
+                        color: Color(0xFFB7B9BD),
+                        fontSize: 12.5,
+                        height: 1.45,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Dot extends StatelessWidget {
+  final bool active;
+  final Color color;
+  final IconData icon;
+  const _Dot({
+    required this.active,
+    required this.color,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOut,
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: active ? color.withOpacity(0.18) : const Color(0xFF1A1A1F),
+        border: Border.all(
+          color: active ? color : const Color(0xFF2C2C2E),
+          width: 1.4,
+        ),
+      ),
+      child: Icon(icon,
+          color: active ? color : const Color(0xFF6E6E73), size: 16),
+    );
+  }
+}
+
+class _TimelineRailPainter extends CustomPainter {
+  final double progress;
+  final int stops;
+  final Color activeColor;
+  final Color idleColor;
+
+  _TimelineRailPainter({
+    required this.progress,
+    required this.stops,
+    required this.activeColor,
+    required this.idleColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.height <= 0) return;
+    // The dot is 34 wide; the rail centres on it at x = 17.
+    const x = 17.0;
+    final top = 17.0;
+    final bottom = size.height - 17.0;
+    if (bottom <= top) return;
+
+    final idlePaint = Paint()
+      ..color = idleColor
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(x, top), Offset(x, bottom), idlePaint);
+
+    final activePaint = Paint()
+      ..color = activeColor
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round;
+    final activeEnd = top + (bottom - top) * progress;
+    canvas.drawLine(Offset(x, top), Offset(x, activeEnd), activePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TimelineRailPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
+
 // ─── Plan tile ────────────────────────────────────────────────────────────────
 class _PlanTile extends StatelessWidget {
-  final String title;
-  final String priceLabel;
-  final String cadence;
-  final String? sublabel;
+  final String label;
+  final String priceTagline;
+  final String? secondaryTagline;
   final String? badge;
-  final bool selected;
   final bool highlight;
+  final bool loading;
+  final bool anyLoading;
   final VoidCallback onTap;
 
   const _PlanTile({
-    required this.title,
-    required this.priceLabel,
-    required this.cadence,
-    required this.selected,
+    required this.label,
+    required this.priceTagline,
     required this.highlight,
+    required this.loading,
+    required this.anyLoading,
     required this.onTap,
-    this.sublabel,
+    this.secondaryTagline,
     this.badge,
   });
 
@@ -765,187 +791,128 @@ class _PlanTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final borderColor = selected
-        ? _accent
-        : (highlight ? _accent.withOpacity(0.45) : const Color(0xFF26262C));
-    final bg = selected
-        ? _accent.withOpacity(0.14)
-        : (highlight ? _accent.withOpacity(0.06) : _surface);
+    final borderColor = highlight
+        ? _accent.withOpacity(0.65)
+        : const Color(0xFF26262C);
+    final bg = highlight ? _accent.withOpacity(0.10) : _surface;
+    final disabled = anyLoading && !loading;
 
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-        padding: EdgeInsets.fromLTRB(
-            16, badge != null ? 12 : 16, 14, 16),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: borderColor,
-            width: selected ? 2 : 1.2,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (badge != null) ...[
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                decoration: BoxDecoration(
-                  color: _accent,
-                  borderRadius: BorderRadius.circular(7),
-                ),
-                child: Text(
-                  badge!,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-            ],
-            Row(
-              children: [
-                _Radio(selected: selected),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      if (sublabel != null) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          sublabel!,
-                          style: TextStyle(
-                            color: highlight ? _accentSoft : _muted,
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      priceLabel,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    Text(
-                      cadence,
-                      style:
-                          const TextStyle(color: _muted, fontSize: 11),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Sub-widgets ──────────────────────────────────────────────────────────
-class _ValueRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  const _ValueRow({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 36,
-          height: 36,
+    return Opacity(
+      opacity: disabled ? 0.55 : 1.0,
+      child: GestureDetector(
+        onTap: anyLoading ? null : onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          padding: EdgeInsets.fromLTRB(
+              16, badge != null ? 12 : 16, 16, 16),
           decoration: BoxDecoration(
-            color: const Color(0xFF6B4EFF).withOpacity(0.16),
-            borderRadius: BorderRadius.circular(11),
+            color: bg,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: borderColor, width: 1.4),
           ),
-          child: Icon(icon,
-              color: const Color(0xFF8B7BFF), size: 19),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14.5,
-                  fontWeight: FontWeight.w600,
+              if (badge != null) ...[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: _accent,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Text(
+                    badge!,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  color: Color(0xFFB7B9BD),
-                  fontSize: 12.5,
-                  height: 1.4,
-                ),
+                const SizedBox(height: 10),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          priceTagline,
+                          style: TextStyle(
+                            color: highlight ? _accentSoft : Colors.white,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (secondaryTagline != null) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            secondaryTagline!,
+                            style: const TextStyle(
+                              color: _muted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _Trailing(loading: loading),
+                ],
               ),
             ],
           ),
         ),
-      ],
+      ),
     );
   }
 }
 
-class _Radio extends StatelessWidget {
-  final bool selected;
-  const _Radio({required this.selected});
+class _Trailing extends StatelessWidget {
+  final bool loading;
+  const _Trailing({required this.loading});
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      width: 22,
-      height: 22,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(
-          color:
-              selected ? const Color(0xFF6B4EFF) : const Color(0xFF3A3A3C),
-          width: 2,
-        ),
-        color: selected ? const Color(0xFF6B4EFF) : Colors.transparent,
+    return SizedBox(
+      width: 34,
+      height: 34,
+      child: Center(
+        child: loading
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  color: Color(0xFF8B7BFF),
+                  strokeWidth: 2.4,
+                ),
+              )
+            : Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF6B4EFF).withOpacity(0.16),
+                ),
+                child: const Icon(Icons.arrow_forward_rounded,
+                    color: Color(0xFF8B7BFF), size: 18),
+              ),
       ),
-      child: selected
-          ? const Icon(Icons.check_rounded, color: Colors.white, size: 14)
-          : null,
     );
   }
 }

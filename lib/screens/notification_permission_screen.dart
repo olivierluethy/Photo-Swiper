@@ -69,7 +69,8 @@ class _NotificationPermissionScreenState
 
     if (!mounted) return;
     HapticFeedback.lightImpact();
-    Navigator.of(context).pushReplacementNamed('/paywall');
+    // Step 1 of the permission flow → photo library is step 2.
+    Navigator.of(context).pushReplacementNamed('/permission');
   }
 
   @override
@@ -209,10 +210,10 @@ class _NotificationPermissionScreenState
   }
 
   Widget _buildStepIndicator() {
-    const active = 1;
+    const active = 0; // step 1 of 2 permission steps
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(3, (i) {
+      children: List.generate(2, (i) {
         final isActive = i == active;
         return AnimatedContainer(
           duration: const Duration(milliseconds: 220),

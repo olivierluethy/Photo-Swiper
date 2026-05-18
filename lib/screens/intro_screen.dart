@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
-import 'permission_screen.dart';
+import 'notification_permission_screen.dart';
 
 class IntroScreen extends StatefulWidget {
   const IntroScreen({super.key});
@@ -68,12 +68,13 @@ class _IntroScreenState extends State<IntroScreen> {
     HapticFeedback.lightImpact();
     PreferencesService.instance.setHasSeenOnboarding(true);
 
-    // Onboarding is followed by the two-step permission flow, then the
-    // mandatory paywall. Every step is a pushReplacement so the user can't
-    // back-gesture out of the funnel.
+    // Onboarding is followed by the two-step permission flow
+    // (notifications → photos), then the benefits showcase, then the
+    // mandatory paywall. Every step is a pushReplacement so the user
+    // can't back-gesture out of the funnel.
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const PermissionScreen(),
+        pageBuilder: (_, __, ___) => const NotificationPermissionScreen(),
         transitionDuration: const Duration(milliseconds: 340),
         reverseTransitionDuration: const Duration(milliseconds: 220),
         transitionsBuilder: (_, animation, __, child) {

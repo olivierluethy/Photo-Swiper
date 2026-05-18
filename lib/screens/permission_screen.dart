@@ -91,8 +91,9 @@ class _PermissionScreenState extends State<PermissionScreen>
     if (!mounted) return;
     HapticFeedback.lightImpact();
     // Regardless of grant/deny we move forward — the user is not allowed
-    // to remain on this screen indefinitely.
-    Navigator.of(context).pushReplacementNamed('/notif-permission');
+    // to remain on this screen indefinitely. Photos is the last permission
+    // step, so we hand off to the benefits showcase.
+    Navigator.of(context).pushReplacementNamed('/benefits');
   }
 
   @override
@@ -118,7 +119,7 @@ class _PermissionScreenState extends State<PermissionScreen>
                     const Spacer(),
                     _buildCta(),
                     const SizedBox(height: 16),
-                    _buildStepIndicator(activeStep: 0),
+                    _buildStepIndicator(activeStep: 1),
                   ],
                 ),
               ),
@@ -233,10 +234,10 @@ class _PermissionScreenState extends State<PermissionScreen>
   }
 
   Widget _buildStepIndicator({required int activeStep}) {
-    // 3 dots — photo perm, notif perm, paywall.
+    // 2 dots — step 1 = notifications (done), step 2 = photos (active).
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(3, (i) {
+      children: List.generate(2, (i) {
         final active = i == activeStep;
         return AnimatedContainer(
           duration: const Duration(milliseconds: 220),

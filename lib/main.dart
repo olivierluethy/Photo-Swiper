@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import 'screens/benefits_screen.dart';
 import 'screens/intro_screen.dart';
 import 'screens/launch_gate.dart';
 import 'screens/notification_permission_screen.dart';
@@ -52,7 +53,7 @@ void main() async {
     statusBarIconBrightness: Brightness.light,
     statusBarBrightness: Brightness.dark,
   ));
-  // First launch: /intro → /permission → /notif-permission → /paywall → /home
+  // First launch: /intro → /notif-permission → /permission → /benefits → /paywall → /home
   // Returning launch: /launchgate awaits the SDK then routes to /home (pro)
   //                   or the mandatory /paywall (non-pro). The user can
   //                   never reach /home without an active entitlement.
@@ -145,8 +146,9 @@ class _PhotoSwiperAppState extends State<PhotoSwiperApp>
       initialRoute: widget.initialRoute,
       routes: {
         '/intro': (_) => const IntroScreen(),
-        '/permission': (_) => const PermissionScreen(),
         '/notif-permission': (_) => const NotificationPermissionScreen(),
+        '/permission': (_) => const PermissionScreen(),
+        '/benefits': (_) => const BenefitsScreen(),
         '/paywall': (_) =>
             const PaywallScreen(source: PaywallSource.onboarding),
         '/launchgate': (_) => const LaunchGate(),
