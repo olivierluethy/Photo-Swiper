@@ -358,6 +358,17 @@ class _SwipeScreenState extends State<SwipeScreen> {
     final laterItems =
         _items.where((i) => i.decision == SwipeDecision.later).toList();
 
+    // A month is "completed" the moment the user has decided every photo
+    // in it. This is independent per year/month — completing October 2024
+    // does not mark October 2023. Today/Random sessions don't map to a
+    // specific month and are intentionally skipped.
+    if (widget.mode == SwipeMode.month &&
+        widget.month != null &&
+        widget.year != null) {
+      unawaited(PreferencesService.instance
+          .markMonthCompleted(widget.year!, widget.month!));
+    }
+
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(

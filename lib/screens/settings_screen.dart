@@ -29,6 +29,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
   late bool _leftHanded;
+  late bool _showCompleted;
   PermissionState? _permissionStatus;
   String _version = '';
 
@@ -36,6 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   void initState() {
     super.initState();
     _leftHanded = PreferencesService.instance.isLeftHanded;
+    _showCompleted = PreferencesService.instance.showCompletedMonths;
     WidgetsBinding.instance.addObserver(this);
     unawaited(AnalyticsService.instance.screen('settings_screen'));
     _loadPermissionStatus();
@@ -74,6 +76,12 @@ class _SettingsScreenState extends State<SettingsScreen>
     HapticFeedback.selectionClick();
     setState(() => _leftHanded = value);
     await PreferencesService.instance.setLeftHanded(value);
+  }
+
+  Future<void> _setShowCompleted(bool value) async {
+    HapticFeedback.selectionClick();
+    setState(() => _showCompleted = value);
+    await PreferencesService.instance.setShowCompletedMonths(value);
   }
 
   Future<void> _rateApp() async {
@@ -224,6 +232,35 @@ class _SettingsScreenState extends State<SettingsScreen>
             _leftHanded
                 ? 'Left-handed mode is on. Swipe right to delete, left to keep.'
                 : 'Default mode. Swipe right to keep, left to delete.',
+          ),
+          const SizedBox(height: 28),
+
+          // ── VIEW ───────────────────────────────────────────────────────────
+          const _SectionLabel('VIEW'),
+          Container(
+            decoration: _kCard,
+            child: SwitchListTile(
+              contentPadding: const EdgeInsets.fromLTRB(16, 6, 12, 6),
+              secondary: _IconChip(
+                icon: Icons.check_circle_outline_rounded,
+                color: const Color(0xFF30D158),
+              ),
+              title: const Text(
+                'Show completed months',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 16,
+                ),
+              ),
+              subtitle: const Text(
+                'Keep finished months in the list. Turn off to hide them by default.',
+                style: TextStyle(color: Color(0xFF8E8E93), fontSize: 13),
+              ),
+              value: _showCompleted,
+              onChanged: _setShowCompleted,
+              activeColor: const Color(0xFF30D158),
+            ),
           ),
           const SizedBox(height: 28),
 

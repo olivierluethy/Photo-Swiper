@@ -13,6 +13,10 @@ class PreferencesService {
   static const _keySwipeHintCount = 'swipe_hint_count';
   static const _keyTrialStartedAt = 'trial_started_at_ms';
   static const _keyTrialReminderScheduled = 'trial_reminder_scheduled';
+  static const _keyCompletedMonths = 'completed_months';
+  static const _keyShowCompletedMonths = 'show_completed_months';
+  static const _keyMonthSortMode = 'month_sort_mode';
+  static const _keyLastNewlyCompleted = 'last_newly_completed_month';
 
   late SharedPreferences _prefs;
 
@@ -71,4 +75,78 @@ class PreferencesService {
 
   Future<void> setTrialReminderScheduled(bool value) =>
       _prefs.setBool(_keyTrialReminderScheduled, value);
+
+  // ─── Month completion tracking ────────────────────────────────────────────
+  // Keys are "YYYY-MM" so October 2024 (`2024-10`) is independent from
+  // October 2023 (`2023-10`). Persisted as a SharedPreferences string list.
+  static String monthKey(int year, int month) =>
+      '$year-${month.toString().padLeft(2, '0')}';
+
+  Set<String> get completedMonths {
+    final list = _prefs.getStringList(_keyCompletedMonths) ?? const [];
+    return list.toSet();
+  }
+
+  bool isMonthCompleted(int year, int month) =>
+      completedMonths.contains(monthKey(year, month));
+
+  /// Marks a year/month as completed. Idempotent. Also records the key so
+  /// the home screen can play a one-shot animation on the corresponding
+  /// card; the home screen consumes and clears that flag on read.
+  Future<void> markMonthCompleted(int year, int month) async {
+    final key = monthKey(year, month);
+    final set = completedMonths;
+    final wasNew = set.add(key);
+    if (wasNew) {
+      await _prefs.setStringList(_keyCompletedMonths, set.toList());
+      await _prefs.setString(_keyLastNewlyCompleted, key);
+    }
+  }
+
+  Future<void> unmarkMonthCompleted(int year, int month) async {
+    final key = monthKey(year, month);
+    final set = completedMonths;
+    if (set.remove(key)) {
+      await _prefs.setStringList(_keyCompletedMonths, set.toList());
+    }
+  }
+
+  /// One-shot read: returns the most recently completed month key (or null)
+  /// and clears the value so the animation only plays once.
+  Future<String?> consumeLastNewlyCompleted() async {
+    final key = _prefs.getString(_keyLastNewlyCompleted);
+    if (key != null) {
+      await _prefs.remove(_keyLastNewlyCompleted);
+    }
+    return key;
+  }
+
+  // ─── View preferences ─────────────────────────────────────────────────────
+  bool get showCompletedMonths =>
+      _prefs.getBool(_keyShowCompletedMonths) ?? true;
+  Future<void> setShowCompletedMonths(bool value) =>
+      _prefs.setBool(_keyShowCompletedMonths, value);
+
+  /// Persisted sort/filter mode for the home month grid. Stored as the enum
+  /// index so renames in code don't accidentally remap stored values — keep
+  /// the [MonthSort] declaration order stable.
+  MonthSort get monthSortMode {
+    final i = _prefs.getInt(_keyMonthSortMode) ?? 0;
+    if (i < 0 || i >= MonthSort.values.length) return MonthSort.defaultOrder;
+    return MonthSort.values[i];
+  }
+
+  Future<void> setMonthSortMode(MonthSort mode) =>
+      _prefs.setInt(_keyMonthSortMode, mode.index);
+}
+
+/// Ordering / filtering modes for the home-screen month grid.
+///
+/// Index is persisted to SharedPreferences — only append new modes at the
+/// end; do not reorder or delete existing entries.
+enum MonthSort {
+  defaultOrder, // chronological (newest month → oldest, current display)
+  largestFirst, // by total file bytes, descending
+  smallestFirst, // by total file bytes, ascending
+  completedOnly, // filter: only months marked complete
 }

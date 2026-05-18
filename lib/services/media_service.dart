@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:photo_manager/photo_manager.dart';
 
 /// Central service for all photo_manager interactions.
@@ -6,6 +8,16 @@ import 'package:photo_manager/photo_manager.dart';
 class MediaService {
   MediaService._();
   static final MediaService instance = MediaService._();
+
+  // ─── In-memory caches ─────────────────────────────────────────────────────
+  // Total bytes per "YYYY-MM" key. Computing requires reading every asset's
+  // origin file, so we keep results around for the lifetime of the process.
+  // Invalidate on deletion via [invalidateMonthSize].
+  final Map<String, int> _monthSizeCache = {};
+  final Map<String, Future<int>> _monthSizeInFlight = {};
+
+  String _monthKey(int year, int month) =>
+      '$year-${month.toString().padLeft(2, '0')}';
 
   // ─── Permission ────────────────────────────────────────────────────────────
 
@@ -157,6 +169,62 @@ class MediaService {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Total byte count for every asset in the given month, summed.
+  ///
+  /// Backed by a per-process cache — the first call for a month does the
+  /// (potentially slow) read; subsequent calls return instantly. Concurrent
+  /// calls for the same month share a single in-flight future so we never
+  /// double-fetch.
+  ///
+  /// On iOS, assets that live only in iCloud Photo Library require a
+  /// download to measure; this method skips any asset whose origin file is
+  /// unavailable (length contribution = 0) rather than blocking on the
+  /// download. Total is therefore a *best-effort* lower bound for users
+  /// whose library is mostly in the cloud.
+  Future<int> getMonthTotalSize(int month, int year) {
+    final key = _monthKey(year, month);
+    final cached = _monthSizeCache[key];
+    if (cached != null) return Future.value(cached);
+    final inflight = _monthSizeInFlight[key];
+    if (inflight != null) return inflight;
+
+    final future = _computeMonthTotalSize(month, year).then((total) {
+      _monthSizeCache[key] = total;
+      _monthSizeInFlight.remove(key);
+      return total;
+    }).catchError((_) {
+      _monthSizeInFlight.remove(key);
+      return 0;
+    });
+    _monthSizeInFlight[key] = future;
+    return future;
+  }
+
+  Future<int> _computeMonthTotalSize(int month, int year) async {
+    final assets = await loadMonthMedia(month, year);
+    if (assets.isEmpty) return 0;
+
+    // Cap concurrency. Without this, hundreds of parallel `originFile`
+    // calls thrash the OS image pipeline (especially the iOS resource
+    // coordinator) and the whole batch slows down rather than speeds up.
+    const concurrency = 8;
+    int total = 0;
+    for (int i = 0; i < assets.length; i += concurrency) {
+      final slice = assets.sublist(
+          i, i + concurrency > assets.length ? assets.length : i + concurrency);
+      final sizes = await Future.wait(slice.map(getFileSize));
+      for (final s in sizes) {
+        if (s != null) total += s;
+      }
+    }
+    return total;
+  }
+
+  /// Invalidate a cached month size (call after deletions in that month).
+  void invalidateMonthSize(int month, int year) {
+    _monthSizeCache.remove(_monthKey(year, month));
   }
 
   // ─── Delete ──────────────────────────────────────────────────────────────────
