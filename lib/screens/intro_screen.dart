@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
 import '../services/analytics_service.dart';
-import '../services/preferences_service.dart';
 import '../widgets/onboarding_visuals.dart';
 import 'notification_permission_screen.dart';
 
@@ -77,7 +76,18 @@ class _IntroScreenState extends State<IntroScreen> {
 
   void _finishOnboarding() {
     HapticFeedback.lightImpact();
-    PreferencesService.instance.setHasSeenOnboarding(true);
+    _goToPermissionFlow();
+  }
+
+  void _skipIntro() {
+    HapticFeedback.selectionClick();
+    _goToPermissionFlow();
+  }
+
+  void _goToPermissionFlow() {
+    // The onboarding-complete flag is intentionally NOT set here — only a
+    // successful paywall purchase qualifies (see PaywallScreen). If the
+    // user bails before that, they re-enter at /intro next launch.
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         pageBuilder: (_, __, ___) => const NotificationPermissionScreen(),
@@ -98,12 +108,51 @@ class _IntroScreenState extends State<IntroScreen> {
     // honours this by rendering a static composition.
     final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
 
+    final isLastSlide = _currentPage == _pages.length - 1;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       body: SafeArea(
         child: Column(
           children: [
-            const SizedBox(height: 48),
+            // Skip lives at the top-right and stays visible across all three
+            // slides. We fade it out on the final slide so it doesn't compete
+            // with the "Get Started" CTA.
+            SizedBox(
+              height: 44,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 200),
+                  opacity: isLastSlide ? 0.0 : 1.0,
+                  child: IgnorePointer(
+                    ignoring: isLastSlide,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: TextButton(
+                        onPressed: _skipIntro,
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFF8E8E93),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        child: const Text(
+                          'Skip',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
             Expanded(
               child: PageView.builder(
                 controller: _pageCtrl,

@@ -7,9 +7,7 @@ class PreferencesService {
   static final PreferencesService instance = PreferencesService._();
 
   static const _keyLeftHanded = 'left_handed_mode';
-  // ignore: unused_field
-  // Kept so reverting the dev override below is a one-line edit.
-  static const _keyOnboarding = 'has_seen_onboarding';
+  static const _keyOnboardingComplete = 'onboarding_complete';
   static const _keySwipeHintCount = 'swipe_hint_count';
   static const _keyTrialStartedAt = 'trial_started_at_ms';
   static const _keyTrialReminderScheduled = 'trial_reminder_scheduled';
@@ -31,23 +29,24 @@ class PreferencesService {
   Future<void> setLeftHanded(bool value) =>
       _prefs.setBool(_keyLeftHanded, value);
 
-  // ─── Onboarding ───────────────────────────────────────────────────────────
+  // ─── Onboarding completion ────────────────────────────────────────────────
   //
-  // ⚠️ DEV OVERRIDE — onboarding is forced to run on every cold launch so
-  // the intro + paywall flow can be verified visually after each build.
-  // No reinstall, no flag wipe, no clear-cache required.
+  // The flag becomes true only after the user has finished the *entire*
+  // onboarding funnel:
+  //   1. Walked (or skipped) the three intro slides.
+  //   2. Responded to the notification permission prompt.
+  //   3. Responded to the photo-library permission prompt.
+  //   4. Confirmed a weekly or yearly purchase via Apple's StoreKit sheet.
   //
-  // To restore production behaviour, replace these two members with their
-  // original implementations (preserved below as comments):
-  //
-  //   bool get hasSeenOnboarding => _prefs.getBool(_keyOnboarding) ?? false;
-  //   Future<void> setHasSeenOnboarding(bool value) =>
-  //       _prefs.setBool(_keyOnboarding, value);
-  bool get hasSeenOnboarding => false;
-  Future<void> setHasSeenOnboarding(bool value) async {
-    // No-op while the dev override is active so the persisted flag never
-    // gets written; ignores any value already in SharedPreferences.
-  }
+  // Set from `PaywallScreen._exitOnSuccess` (the only point at which all
+  // four conditions are jointly true). Users who quit before completing
+  // step 4 will re-enter at /intro on the next launch — which is the
+  // explicit product requirement, not an oversight.
+  bool get isOnboardingComplete =>
+      _prefs.getBool(_keyOnboardingComplete) ?? false;
+
+  Future<void> setOnboardingComplete(bool value) =>
+      _prefs.setBool(_keyOnboardingComplete, value);
 
   // ─── Swipe hint fade-out ──────────────────────────────────────────────────
   // Counts completed swipes; used to progressively fade the edge direction

@@ -53,11 +53,13 @@ void main() async {
     statusBarIconBrightness: Brightness.light,
     statusBarBrightness: Brightness.dark,
   ));
-  // First launch: /intro → /notif-permission → /permission → /benefits → /paywall → /home
-  // Returning launch: /launchgate awaits the SDK then routes to /home (pro)
-  //                   or the mandatory /paywall (non-pro). The user can
-  //                   never reach /home without an active entitlement.
-  final initialRoute = PreferencesService.instance.hasSeenOnboarding
+  // First / incomplete onboarding:
+  //   /intro → /notif-permission → /permission → /benefits → /paywall → /home
+  // Returning launch (onboarding complete):
+  //   /launchgate awaits the RevenueCat SDK then routes to /home (still pro)
+  //   or the mandatory /paywall (subscription lapsed). The user can never
+  //   reach /home without an active entitlement.
+  final initialRoute = PreferencesService.instance.isOnboardingComplete
       ? '/launchgate'
       : '/intro';
   runApp(PhotoSwiperApp(initialRoute: initialRoute));

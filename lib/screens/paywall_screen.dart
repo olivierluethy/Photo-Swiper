@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../services/notification_service.dart';
+import '../services/preferences_service.dart';
 import '../services/purchase_service.dart';
 
 /// FlickClean's mandatory subscription paywall.
@@ -238,9 +239,15 @@ class _PaywallScreenState extends State<PaywallScreen>
   void _exitOnSuccess() {
     if (widget.source == PaywallSource.settings) {
       Navigator.of(context).pop(true);
-    } else {
-      Navigator.of(context).pushReplacementNamed('/home');
+      return;
     }
+    // Onboarding/launch-gate purchases are the *last* step of the funnel.
+    // At this point the user has cleared intro, both permission prompts,
+    // and chosen a plan — that's the full definition of "onboarded".
+    // Idempotent if already true (e.g. resubscribe via launchGate).
+    unawaited(
+        PreferencesService.instance.setOnboardingComplete(true));
+    Navigator.of(context).pushReplacementNamed('/home');
   }
 
   bool get _isMandatory => widget.source != PaywallSource.settings;
