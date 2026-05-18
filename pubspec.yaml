@@ -46,6 +46,7 @@ dependencies:
   posthog_flutter: ^5.11.1
   flutter_local_notifications: ^17.2.4
   timezone: ^0.9.4
+  flutter_animate: ^4.5.0
 
 dev_dependencies:
   flutter_test:

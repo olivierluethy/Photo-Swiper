@@ -1,10 +1,19 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_animate/flutter_animate.dart';
+
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
+import '../widgets/onboarding_visuals.dart';
 import 'notification_permission_screen.dart';
 
+/// 3-slide intro. Each slide pairs a custom animated visual (sweep,
+/// swipe-demo, phone+shield) with a staggered title/subtitle reveal.
+/// Only the currently visible slide animates; the other two pause to
+/// save battery. When the user has Reduce Motion enabled at the OS
+/// level we render quiet, non-moving versions of each visual.
 class IntroScreen extends StatefulWidget {
   const IntroScreen({super.key});
 
@@ -16,28 +25,30 @@ class _IntroScreenState extends State<IntroScreen> {
   final PageController _pageCtrl = PageController();
   int _currentPage = 0;
 
-  static const _pages = [
+  static final List<_SlideData> _pages = [
     _SlideData(
-      icon: Icons.auto_delete_rounded,
-      iconColor: Color(0xFF6B4EFF),
+      accent: const Color(0xFF6B4EFF),
       title: 'Clean Your\nGallery',
       subtitle:
           'Stop scrolling through thousands of photos.\nSwipe to keep or delete — effortlessly.',
+      visualBuilder: (active, reduce) =>
+          Slide1Visual(isActive: active, reduceMotion: reduce),
     ),
     _SlideData(
-      icon: Icons.swipe_rounded,
-      iconColor: Color(0xFF30D158),
+      accent: const Color(0xFF30D158),
       title: 'Swipe to\nDecide',
       subtitle:
           'Swipe right to keep.\nSwipe left to delete.\nNot sure? Tap the center button to review later.',
+      visualBuilder: (active, reduce) =>
+          Slide2Visual(isActive: active, reduceMotion: reduce),
     ),
     _SlideData(
-      icon: Icons.lock_rounded,
-      iconColor: Color(0xFF0A84FF),
+      accent: const Color(0xFF0A84FF),
       title: 'Private by\nDesign',
       subtitle:
           'Everything runs on your device.\nNo cloud uploads. No external storage.\nYour photos never leave your phone.',
-      badge: '100% on-device',
+      visualBuilder: (active, reduce) =>
+          Slide3Visual(isActive: active, reduceMotion: reduce),
     ),
   ];
 
@@ -67,11 +78,6 @@ class _IntroScreenState extends State<IntroScreen> {
   void _finishOnboarding() {
     HapticFeedback.lightImpact();
     PreferencesService.instance.setHasSeenOnboarding(true);
-
-    // Onboarding is followed by the two-step permission flow
-    // (notifications → photos), then the benefits showcase, then the
-    // mandatory paywall. Every step is a pushReplacement so the user
-    // can't back-gesture out of the funnel.
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         pageBuilder: (_, __, ___) => const NotificationPermissionScreen(),
@@ -88,31 +94,32 @@ class _IntroScreenState extends State<IntroScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // OS-level "Reduce Motion" / "Remove Animations" toggle. Every visual
+    // honours this by rendering a static composition.
+    final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       body: SafeArea(
         child: Column(
           children: [
-            // Top-right spacer kept for symmetry; skip removed so users
-            // experience the privacy story before the paywall.
             const SizedBox(height: 48),
-
-            // Slides
             Expanded(
               child: PageView.builder(
                 controller: _pageCtrl,
                 onPageChanged: (i) => setState(() => _currentPage = i),
                 itemCount: _pages.length,
-                itemBuilder: (_, i) => _SlidePage(data: _pages[i]),
+                itemBuilder: (_, i) => _SlidePage(
+                  data: _pages[i],
+                  isActive: i == _currentPage,
+                  reduceMotion: reduceMotion,
+                ),
               ),
             ),
-
-            // Dots + button
             Padding(
               padding: const EdgeInsets.fromLTRB(32, 0, 32, 40),
               child: Column(
                 children: [
-                  // Page indicator dots
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: List.generate(
@@ -132,8 +139,6 @@ class _IntroScreenState extends State<IntroScreen> {
                     ),
                   ),
                   const SizedBox(height: 32),
-
-                  // CTA button
                   SizedBox(
                     width: double.infinity,
                     height: 56,
@@ -168,54 +173,47 @@ class _IntroScreenState extends State<IntroScreen> {
   }
 }
 
-// ─── Slide data model ─────────────────────────────────────────────────────────
+typedef SlideVisualBuilder = Widget Function(bool isActive, bool reduceMotion);
 
 class _SlideData {
-  final IconData icon;
-  final Color iconColor;
+  final Color accent;
   final String title;
   final String subtitle;
-  final String? badge;
+  final SlideVisualBuilder visualBuilder;
 
   const _SlideData({
-    required this.icon,
-    required this.iconColor,
+    required this.accent,
     required this.title,
     required this.subtitle,
-    this.badge,
+    required this.visualBuilder,
   });
 }
 
-// ─── Individual slide page ────────────────────────────────────────────────────
-
 class _SlidePage extends StatelessWidget {
   final _SlideData data;
-  const _SlidePage({required this.data});
+  final bool isActive;
+  final bool reduceMotion;
+
+  const _SlidePage({
+    required this.data,
+    required this.isActive,
+    required this.reduceMotion,
+  });
 
   @override
   Widget build(BuildContext context) {
+    // flutter_animate plays forward when `target` flips 0→1, in reverse
+    // on 1→0. Tying it to `isActive` means a slide re-animates its
+    // title/subtitle every time the user pages back to it.
+    final target = isActive ? 1.0 : 0.0;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Icon blob
-          Container(
-            width: 140,
-            height: 140,
-            decoration: BoxDecoration(
-              color: data.iconColor.withOpacity(0.12),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              data.icon,
-              size: 68,
-              color: data.iconColor,
-            ),
-          ),
+          data.visualBuilder(isActive, reduceMotion),
           const SizedBox(height: 48),
-
-          // Title
           Text(
             data.title,
             textAlign: TextAlign.center,
@@ -226,10 +224,19 @@ class _SlidePage extends StatelessWidget {
               height: 1.15,
               letterSpacing: -0.5,
             ),
-          ),
+          )
+              .animate(target: target)
+              .fade(
+                duration: const Duration(milliseconds: 380),
+                curve: Curves.easeOut,
+              )
+              .slideY(
+                begin: 0.15,
+                end: 0,
+                duration: const Duration(milliseconds: 420),
+                curve: Curves.easeOutCubic,
+              ),
           const SizedBox(height: 20),
-
-          // Subtitle
           Text(
             data.subtitle,
             textAlign: TextAlign.center,
@@ -238,38 +245,20 @@ class _SlidePage extends StatelessWidget {
               fontSize: 17,
               height: 1.55,
             ),
-          ),
-
-          if (data.badge != null) ...[
-            const SizedBox(height: 24),
-            Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-              decoration: BoxDecoration(
-                color: data.iconColor.withOpacity(0.14),
-                borderRadius: BorderRadius.circular(999),
-                border:
-                    Border.all(color: data.iconColor.withOpacity(0.30), width: 1),
+          )
+              .animate(target: target)
+              .fade(
+                duration: const Duration(milliseconds: 380),
+                delay: const Duration(milliseconds: 150),
+                curve: Curves.easeOut,
+              )
+              .slideY(
+                begin: 0.12,
+                end: 0,
+                duration: const Duration(milliseconds: 420),
+                delay: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.shield_rounded,
-                      color: data.iconColor, size: 14),
-                  const SizedBox(width: 6),
-                  Text(
-                    data.badge!,
-                    style: TextStyle(
-                      color: data.iconColor,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
         ],
       ),
     );
