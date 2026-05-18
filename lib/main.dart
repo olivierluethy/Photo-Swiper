@@ -8,8 +8,11 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'screens/intro_screen.dart';
 import 'screens/permission_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/paywall_screen.dart';
+import 'screens/welcome_screen.dart';
 import 'services/analytics_events.dart';
 import 'services/analytics_service.dart';
+import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
 import 'services/purchase_service.dart';
 import 'services/review_prompt_service.dart';
@@ -23,10 +26,13 @@ void main() async {
   await PreferencesService.instance.init();
   await AnalyticsService.instance.init();
   await ReviewPromptService.instance.recordAppLaunch();
-  // RevenueCat init runs in the background — UI doesn't block on it.
-  // Pre-purchase state defaults to free; the listener flips us to pro the
-  // moment configure() returns with an active entitlement.
+  // RevenueCat init runs in the background — the permission gate awaits it
+  // via [PurchaseService.waitForInit] before routing to home/paywall.
   unawaited(PurchaseService.instance.init());
+  // Notifications are initialized eagerly so the post-purchase permission
+  // request resolves instantly. We never schedule anything outside the
+  // Day-3 trial reminder.
+  unawaited(NotificationService.instance.init());
 
   // Attach non-PII super properties so every event is segmentable by app
   // version and platform. Non-blocking.
@@ -45,6 +51,9 @@ void main() async {
     statusBarIconBrightness: Brightness.light,
     statusBarBrightness: Brightness.dark,
   ));
+  // First launch lands on /intro (which then routes intro → paywall →
+  // permission → home). Returning launches go to /permission, where the
+  // entitlement check decides whether to gate via paywall or fast-path home.
   final initialRoute = PreferencesService.instance.hasSeenOnboarding
       ? '/permission'
       : '/intro';
@@ -99,7 +108,7 @@ class _PhotoSwiperAppState extends State<PhotoSwiperApp>
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Photo Swiper',
+      title: 'FlickClean',
       debugShowCheckedModeBanner: false,
 
       // ── Pure dark theme ──────────────────────────────────────────────────────
@@ -134,7 +143,10 @@ class _PhotoSwiperAppState extends State<PhotoSwiperApp>
       initialRoute: widget.initialRoute,
       routes: {
         '/intro': (_) => const IntroScreen(),
+        '/welcome': (_) => const WelcomeScreen(),
         '/permission': (_) => const PermissionScreen(),
+        '/paywall': (_) =>
+            const PaywallScreen(source: PaywallSource.deepTrigger),
         '/home': (_) => const HomeScreen(),
       },
     );

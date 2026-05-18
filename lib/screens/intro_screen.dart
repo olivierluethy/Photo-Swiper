@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
+import 'welcome_screen.dart';
 
 class IntroScreen extends StatefulWidget {
   const IntroScreen({super.key});
@@ -31,11 +32,12 @@ class _IntroScreenState extends State<IntroScreen> {
           'Swipe right to keep.\nSwipe left to delete.\nNot sure? Tap the center button to review later.',
     ),
     _SlideData(
-      icon: Icons.storage_rounded,
-      iconColor: Color(0xFFFFD60A),
-      title: 'Free Up\nSpace',
+      icon: Icons.lock_rounded,
+      iconColor: Color(0xFF0A84FF),
+      title: 'Private by\nDesign',
       subtitle:
-          'Review your picks before anything is deleted.\nSee exactly how much storage you\'ll reclaim.',
+          'Everything runs on your device.\nNo cloud uploads. No external storage.\nYour photos never leave your phone.',
+      badge: '100% on-device',
     ),
   ];
 
@@ -58,14 +60,30 @@ class _IntroScreenState extends State<IntroScreen> {
         curve: Curves.easeInOut,
       );
     } else {
-      _goToPermission();
+      _finishOnboarding();
     }
   }
 
-  void _goToPermission() {
+  void _finishOnboarding() {
     HapticFeedback.lightImpact();
     PreferencesService.instance.setHasSeenOnboarding(true);
-    Navigator.pushReplacementNamed(context, '/permission');
+
+    // After the 3 intro slides we no longer go straight to a paywall.
+    // Instead we hand off to the welcome screen which plants the Premium
+    // seed and lets the user continue to the app. The actual subscription
+    // decision happens deep in the app, post-first-cleanup.
+    Navigator.of(context).pushReplacement(
+      PageRouteBuilder(
+        pageBuilder: (_, __, ___) => const WelcomeScreen(),
+        transitionDuration: const Duration(milliseconds: 340),
+        reverseTransitionDuration: const Duration(milliseconds: 220),
+        transitionsBuilder: (_, animation, __, child) {
+          final fade =
+              CurvedAnimation(parent: animation, curve: Curves.easeOut);
+          return FadeTransition(opacity: fade, child: child);
+        },
+      ),
+    );
   }
 
   @override
@@ -75,20 +93,9 @@ class _IntroScreenState extends State<IntroScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Skip button
-            Align(
-              alignment: Alignment.topRight,
-              child: TextButton(
-                onPressed: _goToPermission,
-                child: const Text(
-                  'Skip',
-                  style: TextStyle(
-                    color: Color(0xFF8E8E93),
-                    fontSize: 16,
-                  ),
-                ),
-              ),
-            ),
+            // Top-right spacer kept for symmetry; skip removed so users
+            // experience the privacy story before the paywall.
+            const SizedBox(height: 48),
 
             // Slides
             Expanded(
@@ -168,12 +175,14 @@ class _SlideData {
   final Color iconColor;
   final String title;
   final String subtitle;
+  final String? badge;
 
   const _SlideData({
     required this.icon,
     required this.iconColor,
     required this.title,
     required this.subtitle,
+    this.badge,
   });
 }
 
@@ -230,6 +239,37 @@ class _SlidePage extends StatelessWidget {
               height: 1.55,
             ),
           ),
+
+          if (data.badge != null) ...[
+            const SizedBox(height: 24),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: data.iconColor.withOpacity(0.14),
+                borderRadius: BorderRadius.circular(999),
+                border:
+                    Border.all(color: data.iconColor.withOpacity(0.30), width: 1),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.shield_rounded,
+                      color: data.iconColor, size: 14),
+                  const SizedBox(width: 6),
+                  Text(
+                    data.badge!,
+                    style: TextStyle(
+                      color: data.iconColor,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );

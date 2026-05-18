@@ -8,6 +8,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:in_app_review/in_app_review.dart';
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
+import '../services/purchase_service.dart';
+import 'paywall_screen.dart';
 
 // Replace with real values before shipping
 // Aktualisierte Werte für FlickClean
@@ -163,6 +165,23 @@ class _SettingsScreenState extends State<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 48),
         children: [
+          // ── SUBSCRIPTION ───────────────────────────────────────────────────
+          const _SectionLabel('SUBSCRIPTION'),
+          _SubscriptionCard(
+            isPro: PurchaseService.instance.isPro,
+            onTap: () {
+              HapticFeedback.lightImpact();
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const PaywallScreen(
+                    source: PaywallSource.settings,
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 28),
+
           // ── SWIPE GESTURES ─────────────────────────────────────────────────
           const _SectionLabel('SWIPE GESTURES'),
           Container(
@@ -568,6 +587,90 @@ class _MockCard extends StatelessWidget {
           Icon(Icons.arrow_forward_ios_rounded, color: rightAction.color, size: 22),
         ],
       );
+}
+
+// ─── Subscription card ───────────────────────────────────────────────────────
+
+class _SubscriptionCard extends StatelessWidget {
+  final bool isPro;
+  final VoidCallback onTap;
+  const _SubscriptionCard({required this.isPro, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = const Color(0xFF6B4EFF);
+    final accentSoft = const Color(0xFF8B7BFF);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              accent.withOpacity(isPro ? 0.10 : 0.20),
+              accent.withOpacity(0.06),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: accent.withOpacity(isPro ? 0.35 : 0.55),
+            width: 1.2,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [accent, accentSoft],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.auto_awesome_rounded,
+                  color: Colors.white, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    isPro ? 'FlickClean Pro' : 'Try FlickClean Pro',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    isPro
+                        ? 'Premium is active. Manage in App Store settings.'
+                        : 'Unlock unlimited swiping · 3-day free trial.',
+                    style: const TextStyle(
+                      color: Color(0xFFB7B9BD),
+                      fontSize: 12.5,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded,
+                color: Color(0xFF8E8E93), size: 22),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _DirectionTile extends StatelessWidget {

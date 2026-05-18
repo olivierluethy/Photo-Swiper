@@ -44,6 +44,8 @@ dependencies:
   video_player: ^2.9.2
   purchases_flutter: ^8.4.0
   posthog_flutter: ^5.11.1
+  flutter_local_notifications: ^17.2.4
+  timezone: ^0.9.4
 
 dev_dependencies:
   flutter_test:

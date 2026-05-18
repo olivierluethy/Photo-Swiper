@@ -3,10 +3,16 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
+
 import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
 
+/// Soft photo-library permission step. Shown after the welcome / premium
+/// nudge. The tone is intentionally quiet — small text, low-contrast
+/// background — and the privacy promise is the focal point. No paywall
+/// gating happens here; the actual subscription decision is deferred
+/// until the user is deep inside the app.
 class PermissionScreen extends StatefulWidget {
   const PermissionScreen({super.key});
 
@@ -14,10 +20,8 @@ class PermissionScreen extends StatefulWidget {
   State<PermissionScreen> createState() => _PermissionScreenState();
 }
 
-// WidgetsBindingObserver lets us detect the app resuming after the user
-// returns from the iOS Settings app so we can re-check without a tap.
 class _PermissionScreenState extends State<PermissionScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   bool _requesting = false;
   bool _silentChecking = false;
 
@@ -26,31 +30,47 @@ class _PermissionScreenState extends State<PermissionScreen>
   // unrelated app-resume event.
   bool _showDeniedFallback = false;
 
+  late final AnimationController _entry;
+  late final Animation<double> _fade;
+
+  static const Color _bg = Color(0xFF0D0D0D);
+  static const Color _accent = Color(0xFF6B4EFF);
+  static const Color _privacy = Color(0xFF0A84FF);
+  static const Color _muted = Color(0xFF8E8E93);
+  static const Color _mutedSoft = Color(0xFF6E6E73);
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(AnalyticsService.instance.screen('permission_screen'));
-    // On return launches, silently check permission to skip straight to home.
+
+    _entry = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 420),
+    );
+    _fade = CurvedAnimation(parent: _entry, curve: Curves.easeOut);
+
+    // Returning launches silently re-check permission and bounce straight
+    // to /home. First-time launches stay on this screen and animate in.
     if (PreferencesService.instance.hasSeenOnboarding) {
       _silentChecking = true;
       WidgetsBinding.instance.addPostFrameCallback((_) => _silentCheck());
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _entry.forward());
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _entry.dispose();
     super.dispose();
   }
 
-  // ─── Lifecycle ────────────────────────────────────────────────────────────────
-
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // When the user comes back from the Settings app, silently re-check.
-    // If they granted access → proceed automatically (no tap needed).
-    // If still denied  → stay on the fallback screen; never auto-redirect again.
     if (state == AppLifecycleState.resumed && _showDeniedFallback) {
       _recheckAfterSettings();
     }
@@ -70,12 +90,11 @@ class _PermissionScreenState extends State<PermissionScreen>
         _silentChecking = false;
         _showDeniedFallback = true;
       });
+      _entry.forward();
     }
   }
 
   Future<void> _recheckAfterSettings() async {
-    // photo_manager returns immediately if status is already determined —
-    // no dialog is shown on this call.
     final ps = await PhotoManager.requestPermissionExtend();
     if (!mounted) return;
     if (ps.isAuth || ps.hasAccess) {
@@ -85,12 +104,9 @@ class _PermissionScreenState extends State<PermissionScreen>
       ));
       _goHome();
     }
-    // Still denied → do nothing; the user stays on the fallback screen.
-    // This is what breaks the app ↔ Settings loop.
   }
 
-  // ─── Permission request ───────────────────────────────────────────────────────
-
+  // ─── Permission request ───────────────────────────────────────────────────
   Future<void> _requestPermission() async {
     if (!Platform.isAndroid && !Platform.isIOS) {
       _goHome();
@@ -107,17 +123,7 @@ class _PermissionScreenState extends State<PermissionScreen>
     ));
 
     try {
-      // photo_manager is already used throughout the app and correctly maps to
-      // the native iOS PHPhotoLibrary API:
-      //   • notDetermined → shows the native iOS permission dialog (once)
-      //   • authorized / limited → returns immediately, no dialog shown
-      //   • denied / restricted   → returns immediately, no dialog shown
-      //
-      // permission_handler incorrectly maps iOS "denied" to "permanentlyDenied"
-      // after the very first denial, causing it to call openAppSettings()
-      // automatically, which creates the app ↔ Settings loop.
       final ps = await PhotoManager.requestPermissionExtend();
-
       if (!mounted) return;
 
       if (ps.isAuth || ps.hasAccess) {
@@ -128,9 +134,6 @@ class _PermissionScreenState extends State<PermissionScreen>
         HapticFeedback.lightImpact();
         _goHome();
       } else {
-        // Denied or restricted.
-        // We NEVER auto-open Settings here — that is what caused the loop.
-        // Instead, switch to the fallback view which has an explicit button.
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.photoPermissionDenied,
         ));
@@ -152,48 +155,55 @@ class _PermissionScreenState extends State<PermissionScreen>
   }
 
   void _openSettings() {
-    // The WidgetsBindingObserver above will detect the return and re-check
-    // automatically, so the user doesn't have to tap anything else.
     PhotoManager.openSetting();
   }
 
-  void _goHome() => Navigator.pushReplacementNamed(context, '/home');
+  /// Navigates to /home. No paywall gating — the deep-in-app trigger
+  /// surfaces the subscription decision later, once the user has tasted
+  /// the experience.
+  void _goHome() {
+    Navigator.of(context).pushReplacementNamed('/home');
+  }
 
-  // ─── Build ────────────────────────────────────────────────────────────────────
-
+  // ─── Build ────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     if (_silentChecking) {
-      return const Scaffold(backgroundColor: Color(0xFF0D0D0D));
+      return const Scaffold(backgroundColor: _bg);
     }
 
     if (!Platform.isAndroid && !Platform.isIOS) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _goHome());
       return const Scaffold(
-        backgroundColor: Color(0xFF0D0D0D),
+        backgroundColor: _bg,
         body: Center(child: CircularProgressIndicator()),
       );
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+      backgroundColor: _bg,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 300),
-            child: _showDeniedFallback
-                ? _DeniedView(
-                    key: const ValueKey('denied'),
-                    onOpenSettings: _openSettings,
-                    onSkip: _goHome,
-                  )
-                : _RequestView(
-                    key: const ValueKey('request'),
-                    requesting: _requesting,
-                    onContinue: _requestPermission,
-                    onSkip: _goHome,
-                  ),
+        child: FadeTransition(
+          opacity: _fade,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(28, 12, 28, 28),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 280),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              child: _showDeniedFallback
+                  ? _DeniedView(
+                      key: const ValueKey('denied'),
+                      onOpenSettings: _openSettings,
+                      onSkip: _goHome,
+                    )
+                  : _RequestView(
+                      key: const ValueKey('request'),
+                      requesting: _requesting,
+                      onContinue: _requestPermission,
+                      onSkip: _goHome,
+                    ),
+            ),
           ),
         ),
       ),
@@ -201,8 +211,7 @@ class _PermissionScreenState extends State<PermissionScreen>
   }
 }
 
-// ─── Default view: explain + trigger native dialog ────────────────────────────
-
+// ─── Default view: soft, small-text ask ──────────────────────────────────────
 class _RequestView extends StatelessWidget {
   final bool requesting;
   final VoidCallback onContinue;
@@ -220,59 +229,91 @@ class _RequestView extends StatelessWidget {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        const Spacer(),
+        // Soft glyph — restrained size, lower visual weight than the
+        // earlier "permission gate" version.
         Container(
-          width: 120,
-          height: 120,
+          width: 78,
+          height: 78,
           decoration: BoxDecoration(
-            color: const Color(0xFF6B4EFF).withOpacity(0.12),
+            color: _PermissionScreenState._accent.withOpacity(0.10),
             shape: BoxShape.circle,
           ),
           child: const Icon(
-            Icons.photo_library_rounded,
-            size: 56,
-            color: Color(0xFF6B4EFF),
+            Icons.photo_library_outlined,
+            color: _PermissionScreenState._accent,
+            size: 34,
           ),
         ),
-        const SizedBox(height: 40),
-
+        const SizedBox(height: 22),
         const Text(
-          'Photo Library',
+          'Allow photo access',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.white,
-            fontSize: 34,
+            fontSize: 22,
             fontWeight: FontWeight.w700,
-            height: 1.2,
-            letterSpacing: -0.5,
+            letterSpacing: -0.2,
           ),
         ),
-        const SizedBox(height: 16),
-
-        const Text(
-          'Photo Swiper uses your photo library\n'
-          'to help you review and clean up your photos.\n\n'
-          'Your media never leaves your device.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: Color(0xFF8E8E93),
-            fontSize: 16,
-            height: 1.6,
+        const SizedBox(height: 8),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 6),
+          child: Text(
+            'FlickClean needs read access to your library so you can swipe through and tidy up your photos.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _PermissionScreenState._muted,
+              fontSize: 13.5,
+              height: 1.5,
+            ),
           ),
         ),
-        const SizedBox(height: 56),
-
+        const SizedBox(height: 22),
+        // Privacy promise — small, low-key, but visually distinct.
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: _PermissionScreenState._privacy.withOpacity(0.10),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: _PermissionScreenState._privacy.withOpacity(0.25),
+              width: 1,
+            ),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lock_outline_rounded,
+                  color: _PermissionScreenState._privacy, size: 16),
+              SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  'Your media stays on this device. Always.',
+                  style: TextStyle(
+                    color: Color(0xFFCED2D8),
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Spacer(),
         SizedBox(
           width: double.infinity,
-          height: 56,
+          height: 54,
           child: ElevatedButton(
             onPressed: requesting ? null : onContinue,
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF6B4EFF),
+              backgroundColor: _PermissionScreenState._accent,
               foregroundColor: Colors.white,
               disabledBackgroundColor:
-                  const Color(0xFF6B4EFF).withOpacity(0.5),
+                  _PermissionScreenState._accent.withOpacity(0.5),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(15),
               ),
               elevation: 0,
             ),
@@ -281,26 +322,28 @@ class _RequestView extends StatelessWidget {
                     width: 22,
                     height: 22,
                     child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
+                      strokeWidth: 2.4,
                       valueColor: AlwaysStoppedAnimation(Colors.white),
                     ),
                   )
                 : const Text(
-                    'Continue',
+                    'Allow Photos',
                     style: TextStyle(
-                      fontSize: 17,
+                      fontSize: 16,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
           ),
         ),
-        const SizedBox(height: 16),
-
+        const SizedBox(height: 8),
         TextButton(
           onPressed: requesting ? null : onSkip,
           child: const Text(
-            'Not now',
-            style: TextStyle(color: Color(0xFF8E8E93), fontSize: 16),
+            'Maybe later',
+            style: TextStyle(
+              color: _PermissionScreenState._mutedSoft,
+              fontSize: 13.5,
+            ),
           ),
         ),
       ],
@@ -308,10 +351,7 @@ class _RequestView extends StatelessWidget {
   }
 }
 
-// ─── Fallback view: shown only after an explicit denial ──────────────────────
-// Never triggered automatically — always requires the user to have tapped
-// "Continue" first and received a denial from the iOS permission dialog.
-
+// ─── Denied fallback (also softened) ─────────────────────────────────────────
 class _DeniedView extends StatelessWidget {
   final VoidCallback onOpenSettings;
   final VoidCallback onSkip;
@@ -327,74 +367,73 @@ class _DeniedView extends StatelessWidget {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        const Spacer(),
         Container(
-          width: 120,
-          height: 120,
+          width: 78,
+          height: 78,
           decoration: BoxDecoration(
             color: const Color(0xFFFF453A).withOpacity(0.10),
             shape: BoxShape.circle,
           ),
           child: const Icon(
-            Icons.no_photography_rounded,
-            size: 52,
+            Icons.no_photography_outlined,
             color: Color(0xFFFF453A),
+            size: 32,
           ),
         ),
-        const SizedBox(height: 40),
-
+        const SizedBox(height: 22),
         const Text(
-          'Access Needed',
+          'Access turned off',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.white,
-            fontSize: 28,
+            fontSize: 22,
             fontWeight: FontWeight.w700,
-            letterSpacing: -0.3,
+            letterSpacing: -0.2,
           ),
         ),
-        const SizedBox(height: 16),
-
-        const Text(
-          'To review and clean up your photos,\n'
-          'Photo Swiper needs access to your library.\n\n'
-          'In Settings → Privacy → Photos,\n'
-          'set Photo Swiper to "All Photos".',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: Color(0xFF8E8E93),
-            fontSize: 15,
-            height: 1.65,
+        const SizedBox(height: 10),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 4),
+          child: Text(
+            'Open Settings → Privacy → Photos → FlickClean and switch on “All Photos” to start cleaning.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _PermissionScreenState._muted,
+              fontSize: 13.5,
+              height: 1.55,
+            ),
           ),
         ),
-        const SizedBox(height: 52),
-
-        // Explicit user action — never called automatically
+        const Spacer(),
         SizedBox(
           width: double.infinity,
-          height: 56,
+          height: 54,
           child: ElevatedButton(
             onPressed: onOpenSettings,
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF6B4EFF),
+              backgroundColor: _PermissionScreenState._accent,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(15),
               ),
               elevation: 0,
             ),
             child: const Text(
               'Open Settings',
-              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
           ),
         ),
-        const SizedBox(height: 16),
-
+        const SizedBox(height: 8),
         TextButton(
           onPressed: onSkip,
           child: const Text(
             'Continue without photos',
-            style: TextStyle(color: Color(0xFF8E8E93), fontSize: 15),
+            style: TextStyle(
+              color: _PermissionScreenState._mutedSoft,
+              fontSize: 13.5,
+            ),
           ),
         ),
       ],

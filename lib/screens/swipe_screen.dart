@@ -11,10 +11,8 @@ import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
 import '../services/media_service.dart';
 import '../services/preferences_service.dart';
-import '../services/purchase_service.dart';
 import '../widgets/swipe_card.dart';
 import '../widgets/video_preview_card.dart';
-import 'paywall_screen.dart';
 import 'review_screen.dart';
 
 enum SwipeMode { month, today, random }
@@ -89,7 +87,6 @@ class _SwipeScreenState extends State<SwipeScreen> {
     _leftHanded = PreferencesService.instance.isLeftHanded;
     _swipeHintCount = PreferencesService.instance.swipeHintCount;
     _zoomController.addListener(_onZoomChanged);
-    PurchaseService.instance.addListener(_onProStatusChanged);
     unawaited(AnalyticsService.instance.screen('swipe_screen', properties: {
       'mode': widget.mode.name,
     }));
@@ -113,14 +110,7 @@ class _SwipeScreenState extends State<SwipeScreen> {
     _zoomController.removeListener(_onZoomChanged);
     _zoomController.dispose();
     _stripController.dispose();
-    PurchaseService.instance.removeListener(_onProStatusChanged);
     super.dispose();
-  }
-
-  /// Rebuild when entitlement state changes — e.g. purchase completes while
-  /// the swipe screen sits behind the paywall.
-  void _onProStatusChanged() {
-    if (mounted) setState(() {});
   }
 
   void _onZoomChanged() {
@@ -270,18 +260,6 @@ class _SwipeScreenState extends State<SwipeScreen> {
   void _decide(SwipeDecision decision) {
     if (_currentIndex >= _items.length) return;
 
-    // Paywall gate: pro users skip this entirely; free users get blocked
-    // the moment they try to swipe past the free allowance. Bump _cardKey so
-    // the SwipeCard remounts (offset = 0) — without this the card would stay
-    // visually off-screen after a drag-swipe gets intercepted here.
-    if (!PurchaseService.instance.isPro &&
-        PreferencesService.instance.lifetimeSwipes >=
-            PreferencesService.kFreeSwipeLimit) {
-      setState(() => _cardKey++);
-      _presentPaywall();
-      return;
-    }
-
     HapticFeedback.selectionClick();
     _resetZoom();
 
@@ -306,7 +284,6 @@ class _SwipeScreenState extends State<SwipeScreen> {
     ));
 
     PreferencesService.instance.incrementSwipeHintCount();
-    PreferencesService.instance.incrementLifetimeSwipes();
 
     if (_currentIndex >= _items.length) {
       _sessionCompleted = true;
@@ -321,25 +298,6 @@ class _SwipeScreenState extends State<SwipeScreen> {
     _preloadThumb(_currentIndex + 2);
     _loadFileSize(_currentIndex);
     _loadFileSize(_currentIndex + 1);
-  }
-
-  Future<void> _presentPaywall() async {
-    HapticFeedback.mediumImpact();
-    await Navigator.of(context).push<bool>(
-      PageRouteBuilder<bool>(
-        opaque: true,
-        barrierDismissible: false,
-        pageBuilder: (_, __, ___) => const PaywallScreen(blocking: true),
-        transitionsBuilder: (_, anim, __, child) => FadeTransition(
-          opacity: anim,
-          child: child,
-        ),
-        transitionDuration: const Duration(milliseconds: 220),
-      ),
-    );
-    // No need to act on the return value — entitlement state propagates via
-    // PurchaseService's listener and the next swipe attempt is re-evaluated.
-    if (mounted) setState(() {});
   }
 
   /// Jump directly to [index] without swiping through intermediate cards.

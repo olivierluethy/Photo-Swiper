@@ -1,7 +1,12 @@
+import 'dart:async';
 import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:purchases_flutter/purchases_flutter.dart';
+
+import 'notification_service.dart';
+import 'preferences_service.dart';
 
 /// Wraps RevenueCat. Single source of truth for paywall state.
 ///
@@ -24,10 +29,16 @@ class PurchaseService extends ChangeNotifier {
 
   bool _initialized = false;
   bool _isPro = false;
+  bool _isInTrial = false;
   Offerings? _offerings;
   String? _lastError;
 
+  // Completes once the first [init] call finishes (success or failure). Lets
+  // navigation gates await the SDK's readiness without racing the UI.
+  final Completer<void> _initCompleter = Completer<void>();
+
   bool get isPro => _isPro;
+  bool get isInTrial => _isInTrial;
   bool get isInitialized => _initialized;
   Offering? get currentOffering => _offerings?.current;
   String? get lastError => _lastError;
@@ -37,20 +48,24 @@ class PurchaseService extends ChangeNotifier {
   bool get hasNoCurrentOffering =>
       _offerings != null && _offerings!.current == null;
 
+  /// Resolves once [init] has finished. UI gates use this so they can wait
+  /// for the entitlement state to settle before routing the user.
+  Future<void> waitForInit() => _initCompleter.future;
+
   /// Initializes the SDK. Safe to call multiple times — subsequent calls are
   /// no-ops. Failures are swallowed so a misconfigured key never crashes the
   /// app; the user simply stays on the free tier until config is fixed.
   Future<void> init() async {
     if (_initialized) return;
     if (!_supportedPlatform) {
-      _initialized = true;
+      _finishInit();
       return;
     }
     final apiKey = Platform.isIOS ? _iosApiKey : _androidApiKey;
     if (apiKey.contains('REPLACE_WITH')) {
       _lastError = 'API key not configured for this platform.';
       debugPrint('[PurchaseService] $_lastError');
-      _initialized = true;
+      _finishInit();
       return;
     }
 
@@ -62,7 +77,7 @@ class PurchaseService extends ChangeNotifier {
       await Purchases.configure(PurchasesConfiguration(apiKey));
 
       final info = await Purchases.getCustomerInfo();
-      _isPro = _hasProEntitlement(info);
+      _applyCustomerInfo(info, notify: false);
 
       Purchases.addCustomerInfoUpdateListener(_onCustomerInfoUpdate);
 
@@ -76,9 +91,14 @@ class PurchaseService extends ChangeNotifier {
       _lastError = e.toString();
       debugPrint('[PurchaseService] init failed: $_lastError');
     } finally {
-      _initialized = true;
-      notifyListeners();
+      _finishInit();
     }
+  }
+
+  void _finishInit() {
+    _initialized = true;
+    if (!_initCompleter.isCompleted) _initCompleter.complete();
+    notifyListeners();
   }
 
   String _describeError(PlatformException e) {
@@ -115,8 +135,7 @@ class PurchaseService extends ChangeNotifier {
     if (!_supportedPlatform) return false;
     try {
       final result = await Purchases.purchasePackage(package);
-      _isPro = _hasProEntitlement(result);
-      notifyListeners();
+      _applyCustomerInfo(result);
       return _isPro;
     } on PlatformException catch (e) {
       final code = PurchasesErrorHelper.getErrorCode(e);
@@ -132,8 +151,7 @@ class PurchaseService extends ChangeNotifier {
     if (!_supportedPlatform) return _isPro;
     try {
       final info = await Purchases.restorePurchases();
-      _isPro = _hasProEntitlement(info);
-      notifyListeners();
+      _applyCustomerInfo(info);
       return _isPro;
     } catch (e) {
       debugPrint('[PurchaseService] restore failed: $e');
@@ -142,16 +160,51 @@ class PurchaseService extends ChangeNotifier {
   }
 
   void _onCustomerInfoUpdate(CustomerInfo info) {
-    final next = _hasProEntitlement(info);
-    if (next != _isPro) {
-      _isPro = next;
-      notifyListeners();
-    }
+    _applyCustomerInfo(info);
   }
 
-  bool _hasProEntitlement(CustomerInfo info) {
+  /// Pulls entitlement + trial state out of [info] and updates internal flags.
+  /// Side-effect: when the entitlement transitions into an active trial we
+  /// schedule the single Day-3 reminder (idempotent).
+  void _applyCustomerInfo(CustomerInfo info, {bool notify = true}) {
     final ent = info.entitlements.active[entitlementId];
-    return ent != null && ent.isActive;
+    final isActive = ent != null && ent.isActive;
+    final isTrial = isActive && ent.periodType == PeriodType.trial;
+
+    final wasPro = _isPro;
+    final wasTrial = _isInTrial;
+    _isPro = isActive;
+    _isInTrial = isTrial;
+
+    // First time we see a trial activation → persist start + schedule the
+    // single reminder. Subsequent updates while in-trial are no-ops because
+    // the scheduling call is idempotent.
+    if (isTrial && !wasTrial) {
+      _onTrialActivated();
+    }
+
+    // Trial converted to a regular yearly billing (or any non-trial state) →
+    // cancel any pending Day-3 reminder, it would be confusing now.
+    if (wasTrial && !isTrial && isActive) {
+      unawaited(NotificationService.instance.cancelTrialReminder());
+    }
+
+    final changed = wasPro != _isPro || wasTrial != _isInTrial;
+    if (notify && changed) notifyListeners();
+  }
+
+  void _onTrialActivated() {
+    final prefs = PreferencesService.instance;
+    final existing = prefs.trialStartedAt;
+    final start = existing ?? DateTime.now();
+    if (existing == null) {
+      unawaited(prefs.setTrialStartedAt(start));
+    }
+    unawaited(
+      NotificationService.instance.scheduleTrialEndingReminder(
+        trialStartedAt: start,
+      ),
+    );
   }
 
   bool get _supportedPlatform => Platform.isIOS || Platform.isAndroid;
