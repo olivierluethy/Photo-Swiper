@@ -1,27 +1,25 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:photo_manager/photo_manager.dart';
 
-import '../services/analytics_events.dart';
 import '../services/analytics_service.dart';
+import '../services/notification_service.dart';
 
-/// Step 1 of the post-onboarding flow: photo-library permission.
+/// Step 2 of the post-onboarding flow: notification permission.
 ///
-/// The user cannot skip — Continue is the only action. Tapping it triggers
-/// the native iOS permission dialog and advances to the notification step
-/// regardless of the user's choice. If the user denies, photos simply won't
-/// load until they re-enable access from iOS Settings later; we don't
-/// dead-end them here because there's no way out of the onboarding flow.
-class PermissionScreen extends StatefulWidget {
-  const PermissionScreen({super.key});
+/// Continue triggers the native OS prompt for notifications and then
+/// advances to the paywall — granted or not. The only notification this
+/// app will ever fire is the single Day-3 trial-ending reminder.
+class NotificationPermissionScreen extends StatefulWidget {
+  const NotificationPermissionScreen({super.key});
 
   @override
-  State<PermissionScreen> createState() => _PermissionScreenState();
+  State<NotificationPermissionScreen> createState() =>
+      _NotificationPermissionScreenState();
 }
 
-class _PermissionScreenState extends State<PermissionScreen>
+class _NotificationPermissionScreenState
+    extends State<NotificationPermissionScreen>
     with SingleTickerProviderStateMixin {
   bool _requesting = false;
 
@@ -37,7 +35,7 @@ class _PermissionScreenState extends State<PermissionScreen>
   @override
   void initState() {
     super.initState();
-    unawaited(AnalyticsService.instance.screen('permission_screen'));
+    unawaited(AnalyticsService.instance.screen('notif_permission_screen'));
     _entry = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 420),
@@ -60,44 +58,22 @@ class _PermissionScreenState extends State<PermissionScreen>
     if (_requesting) return;
     setState(() => _requesting = true);
 
-    unawaited(AnalyticsService.instance.track(
-      AnalyticsEvents.photoPermissionRequested,
-    ));
-
-    if (Platform.isAndroid || Platform.isIOS) {
-      try {
-        final ps = await PhotoManager.requestPermissionExtend();
-        if (ps.isAuth || ps.hasAccess) {
-          unawaited(AnalyticsService.instance.track(
-            AnalyticsEvents.photoPermissionGranted,
-            properties: const {'source': 'prompt'},
-          ));
-        } else {
-          unawaited(AnalyticsService.instance.track(
-            AnalyticsEvents.photoPermissionDenied,
-          ));
-        }
-      } catch (e) {
-        unawaited(AnalyticsService.instance.track(
-          AnalyticsEvents.errorOccurred,
-          properties: {
-            'error_type': e.runtimeType.toString(),
-            'context': 'permission_request',
-          },
-        ));
-      }
+    try {
+      // System dialog. Result is intentionally ignored — the user is
+      // advanced to the paywall either way.
+      await NotificationService.instance.requestPermission();
+    } catch (_) {
+      // Silent — analytics layer logs nothing here, and a failed system
+      // dialog must never block the funnel.
     }
 
     if (!mounted) return;
     HapticFeedback.lightImpact();
-    // Regardless of grant/deny we move forward — the user is not allowed
-    // to remain on this screen indefinitely.
-    Navigator.of(context).pushReplacementNamed('/notif-permission');
+    Navigator.of(context).pushReplacementNamed('/paywall');
   }
 
   @override
   Widget build(BuildContext context) {
-    // The user is mid-onboarding; back gestures must not let them out.
     return PopScope(
       canPop: false,
       child: Scaffold(
@@ -118,7 +94,7 @@ class _PermissionScreenState extends State<PermissionScreen>
                     const Spacer(),
                     _buildCta(),
                     const SizedBox(height: 16),
-                    _buildStepIndicator(activeStep: 0),
+                    _buildStepIndicator(),
                   ],
                 ),
               ),
@@ -139,12 +115,12 @@ class _PermissionScreenState extends State<PermissionScreen>
             color: _accent.withOpacity(0.10),
             shape: BoxShape.circle,
           ),
-          child: const Icon(Icons.photo_library_outlined,
-              color: _accent, size: 34),
+          child: const Icon(Icons.notifications_active_outlined,
+              color: _accent, size: 32),
         ),
         const SizedBox(height: 22),
         const Text(
-          'Allow photo access',
+          'Enable notifications',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.white,
@@ -157,7 +133,7 @@ class _PermissionScreenState extends State<PermissionScreen>
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 6),
           child: Text(
-            'FlickClean needs read access to your library so you can swipe through and tidy up your photos.',
+            'We only ever send one notification — a friendly reminder when your free trial is ending. Nothing else.',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: _muted,
@@ -185,7 +161,7 @@ class _PermissionScreenState extends State<PermissionScreen>
           SizedBox(width: 8),
           Flexible(
             child: Text(
-              'Your photos stay on this device. Always.',
+              'Reminders are scheduled locally on this device.',
               style: TextStyle(
                 color: Color(0xFFCED2D8),
                 fontSize: 12.5,
@@ -232,19 +208,20 @@ class _PermissionScreenState extends State<PermissionScreen>
     );
   }
 
-  Widget _buildStepIndicator({required int activeStep}) {
-    // 3 dots — photo perm, notif perm, paywall.
+  Widget _buildStepIndicator() {
+    const active = 1;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: List.generate(3, (i) {
-        final active = i == activeStep;
+        final isActive = i == active;
         return AnimatedContainer(
           duration: const Duration(milliseconds: 220),
           margin: const EdgeInsets.symmetric(horizontal: 4),
-          width: active ? 20 : 6,
+          width: isActive ? 20 : 6,
           height: 6,
           decoration: BoxDecoration(
-            color: active ? _accent : const Color(0xFF3A3A3C),
+            color:
+                isActive ? _accent : const Color(0xFF3A3A3C),
             borderRadius: BorderRadius.circular(3),
           ),
         );

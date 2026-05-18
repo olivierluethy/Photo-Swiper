@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
-import '../services/preferences_service.dart';
 
 class ResultScreen extends StatefulWidget {
   final int deletedCount;
@@ -40,14 +39,6 @@ class _ResultScreenState extends State<ResultScreen>
       'deleted_count': widget.deletedCount,
       'freed_bytes': widget.freedBytes,
     }));
-
-    // A "cleanup" only counts if the user actually committed deletions —
-    // a zero-delete session doesn't earn the deep paywall trigger because
-    // they haven't yet experienced the core value of the app.
-    if (widget.deletedCount > 0) {
-      unawaited(
-          PreferencesService.instance.incrementCleanupsCompleted());
-    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _ctrl.forward();

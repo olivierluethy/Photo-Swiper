@@ -3,9 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
 import '../services/media_service.dart';
-import '../services/preferences_service.dart';
-import '../services/purchase_service.dart';
-import 'paywall_screen.dart';
 import 'swipe_screen.dart';
 import 'grid_select_screen.dart';
 import 'settings_screen.dart';
@@ -37,53 +34,6 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     unawaited(AnalyticsService.instance.screen('home_screen'));
     _init();
-    // Deep-in-app trigger: once the user has finished their first real
-    // cleanup, fire the paywall a beat after the home screen has settled.
-    // Once shown, the flag flips and it never auto-fires again — manual
-    // access stays available via Settings → FlickClean Pro.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowDeepPaywall());
-  }
-
-  Future<void> _maybeShowDeepPaywall() async {
-    final prefs = PreferencesService.instance;
-    if (prefs.deepPaywallShown) return;
-    if (prefs.cleanupsCompleted < 1) return;
-    await PurchaseService.instance.waitForInit();
-    if (!mounted) return;
-    if (PurchaseService.instance.isPro) return;
-
-    // Mark immediately so a re-entry into this screen can't race us into a
-    // duplicate present.
-    await prefs.setDeepPaywallShown(true);
-    if (!mounted) return;
-
-    // Slight delay so the user sees Home settle before the sheet rises.
-    await Future<void>.delayed(const Duration(milliseconds: 600));
-    if (!mounted) return;
-
-    await Navigator.of(context).push<bool>(
-      PageRouteBuilder<bool>(
-        opaque: true,
-        barrierDismissible: false,
-        transitionDuration: const Duration(milliseconds: 340),
-        reverseTransitionDuration: const Duration(milliseconds: 220),
-        pageBuilder: (_, __, ___) =>
-            const PaywallScreen(source: PaywallSource.deepTrigger),
-        transitionsBuilder: (_, anim, __, child) {
-          final fade =
-              CurvedAnimation(parent: anim, curve: Curves.easeOut);
-          final slide = Tween<Offset>(
-            begin: const Offset(0, 0.06),
-            end: Offset.zero,
-          ).animate(
-              CurvedAnimation(parent: anim, curve: Curves.easeOutCubic));
-          return FadeTransition(
-            opacity: fade,
-            child: SlideTransition(position: slide, child: child),
-          );
-        },
-      ),
-    );
   }
 
   Future<void> _init() async {

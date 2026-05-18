@@ -6,10 +6,11 @@ import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'screens/intro_screen.dart';
+import 'screens/launch_gate.dart';
+import 'screens/notification_permission_screen.dart';
 import 'screens/permission_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/paywall_screen.dart';
-import 'screens/welcome_screen.dart';
 import 'services/analytics_events.dart';
 import 'services/analytics_service.dart';
 import 'services/notification_service.dart';
@@ -51,11 +52,12 @@ void main() async {
     statusBarIconBrightness: Brightness.light,
     statusBarBrightness: Brightness.dark,
   ));
-  // First launch lands on /intro (which then routes intro → paywall →
-  // permission → home). Returning launches go to /permission, where the
-  // entitlement check decides whether to gate via paywall or fast-path home.
+  // First launch: /intro → /permission → /notif-permission → /paywall → /home
+  // Returning launch: /launchgate awaits the SDK then routes to /home (pro)
+  //                   or the mandatory /paywall (non-pro). The user can
+  //                   never reach /home without an active entitlement.
   final initialRoute = PreferencesService.instance.hasSeenOnboarding
-      ? '/permission'
+      ? '/launchgate'
       : '/intro';
   runApp(PhotoSwiperApp(initialRoute: initialRoute));
 }
@@ -143,10 +145,11 @@ class _PhotoSwiperAppState extends State<PhotoSwiperApp>
       initialRoute: widget.initialRoute,
       routes: {
         '/intro': (_) => const IntroScreen(),
-        '/welcome': (_) => const WelcomeScreen(),
         '/permission': (_) => const PermissionScreen(),
+        '/notif-permission': (_) => const NotificationPermissionScreen(),
         '/paywall': (_) =>
-            const PaywallScreen(source: PaywallSource.deepTrigger),
+            const PaywallScreen(source: PaywallSource.onboarding),
+        '/launchgate': (_) => const LaunchGate(),
         '/home': (_) => const HomeScreen(),
       },
     );

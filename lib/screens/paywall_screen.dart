@@ -14,23 +14,26 @@ import '../services/purchase_service.dart';
 ///   • Weekly  — billed every 7 days, includes a 3-day free trial
 ///   • Yearly  — billed upfront, biggest savings (shown as "BEST VALUE")
 ///
-/// The user picks one tile, the CTA wording adapts ("Start 3-Day Free Trial"
-/// for weekly, "Subscribe Yearly" for yearly), and a single tap purchases
-/// the selected package via RevenueCat.
+/// In the onboarding flow this paywall is mandatory: there is no close
+/// button and the system back gesture is blocked. The only way out is a
+/// successful purchase or restore. From `PaywallSource.settings` we honour
+/// a back gesture / close button so existing subscribers can browse the
+/// screen without being trapped.
 class PaywallScreen extends StatefulWidget {
-  /// Where the paywall is being presented from. Drives analytics.
+  /// Where the paywall is being presented from. Drives analytics + whether
+  /// the close button + back gesture are enabled.
   final PaywallSource source;
 
   const PaywallScreen({
     super.key,
-    this.source = PaywallSource.deepTrigger,
+    this.source = PaywallSource.onboarding,
   });
 
   @override
   State<PaywallScreen> createState() => _PaywallScreenState();
 }
 
-enum PaywallSource { onboarding, deepTrigger, settings }
+enum PaywallSource { onboarding, launchGate, settings }
 
 class _PaywallScreenState extends State<PaywallScreen>
     with SingleTickerProviderStateMixin {
@@ -177,7 +180,7 @@ class _PaywallScreenState extends State<PaywallScreen>
           unawaited(NotificationService.instance.requestPermission());
         }
 
-        Navigator.of(context).pop(true);
+        _exitOnSuccess();
       } else {
         setState(() => _purchasing = false);
       }
@@ -189,6 +192,19 @@ class _PaywallScreenState extends State<PaywallScreen>
       });
     }
   }
+
+  /// Where to go once a purchase / restore succeeds. In the onboarding
+  /// flow the paywall is the final gate before /home, so we replace the
+  /// route stack. From settings, we just pop the modal back to the caller.
+  void _exitOnSuccess() {
+    if (widget.source == PaywallSource.settings) {
+      Navigator.of(context).pop(true);
+    } else {
+      Navigator.of(context).pushReplacementNamed('/home');
+    }
+  }
+
+  bool get _isMandatory => widget.source != PaywallSource.settings;
 
   Future<void> _onRestorePressed() async {
     if (_purchasing || _restoring) return;
@@ -204,7 +220,7 @@ class _PaywallScreenState extends State<PaywallScreen>
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.subscriptionRestored,
       ));
-      Navigator.of(context).pop(true);
+      _exitOnSuccess();
       return;
     }
     setState(() {
@@ -234,27 +250,34 @@ class _PaywallScreenState extends State<PaywallScreen>
   // ─── Build ──────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _bg,
-      body: SafeArea(
-        child: FadeTransition(
-          opacity: _fade,
-          child: SlideTransition(
-            position: _slide,
-            child: Stack(
-              children: [
-                _buildScroll(),
-                Positioned(
-                  top: 4,
-                  right: 4,
-                  child: IconButton(
-                    icon: const Icon(Icons.close_rounded,
-                        color: _muted, size: 26),
-                    onPressed: _onClosePressed,
-                    tooltip: 'Close',
-                  ),
-                ),
-              ],
+    // Mandatory onboarding paywall: PopScope blocks Android back + iOS
+    // edge-swipe; no close button is rendered. From Settings we keep the
+    // close button + back gesture so existing subscribers can browse.
+    return PopScope(
+      canPop: !_isMandatory,
+      child: Scaffold(
+        backgroundColor: _bg,
+        body: SafeArea(
+          child: FadeTransition(
+            opacity: _fade,
+            child: SlideTransition(
+              position: _slide,
+              child: Stack(
+                children: [
+                  _buildScroll(),
+                  if (!_isMandatory)
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: IconButton(
+                        icon: const Icon(Icons.close_rounded,
+                            color: _muted, size: 26),
+                        onPressed: _onClosePressed,
+                        tooltip: 'Close',
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -275,7 +298,8 @@ class _PaywallScreenState extends State<PaywallScreen>
         _buildPrivacyCallout(),
         const SizedBox(height: 24),
         _buildPlans(),
-        const SizedBox(height: 18),
+        const SizedBox(height: 12),
+        _buildTrialHighlight(),
         _buildErrorBanner(),
         _buildPrimaryCta(),
         const SizedBox(height: 14),
@@ -528,6 +552,73 @@ class _PaywallScreenState extends State<PaywallScreen>
     final perWeek = price / 52.0;
     final code = annual.storeProduct.currencyCode;
     return '$code ${perWeek.toStringAsFixed(2)}';
+  }
+
+  // ─── Trial highlight ────────────────────────────────────────────────────
+  // Pops in when weekly is the selected plan; quietly disappears for yearly.
+  // Spells out the deal in confident, calm language right above the CTA so
+  // the trial terms are unmissable.
+  Widget _buildTrialHighlight() {
+    final isWeekly = _selected?.packageType == PackageType.weekly;
+    final priceLabel = _selected?.storeProduct.priceString ?? '';
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        child: isWeekly
+            ? Padding(
+                key: const ValueKey('weekly-trial'),
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 11),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF30D158).withOpacity(0.10),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0xFF30D158).withOpacity(0.35),
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.celebration_rounded,
+                          color: Color(0xFF30D158), size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text.rich(
+                          TextSpan(
+                            style: const TextStyle(
+                              color: Color(0xFFD7E9DC),
+                              fontSize: 12.5,
+                              height: 1.45,
+                            ),
+                            children: [
+                              const TextSpan(
+                                text: 'Free for 3 days. ',
+                                style: TextStyle(
+                                  color: Color(0xFF7BEFA0),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              TextSpan(
+                                text: 'After your trial, '
+                                    '${priceLabel.isEmpty ? "weekly billing" : "$priceLabel/week"} '
+                                    'starts automatically. Cancel anytime.',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            : const SizedBox.shrink(key: ValueKey('no-trial')),
+      ),
+    );
   }
 
   // ─── CTA ────────────────────────────────────────────────────────────────

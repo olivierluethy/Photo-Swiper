@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
 import '../services/preferences_service.dart';
-import 'welcome_screen.dart';
+import 'permission_screen.dart';
 
 class IntroScreen extends StatefulWidget {
   const IntroScreen({super.key});
@@ -68,13 +68,12 @@ class _IntroScreenState extends State<IntroScreen> {
     HapticFeedback.lightImpact();
     PreferencesService.instance.setHasSeenOnboarding(true);
 
-    // After the 3 intro slides we no longer go straight to a paywall.
-    // Instead we hand off to the welcome screen which plants the Premium
-    // seed and lets the user continue to the app. The actual subscription
-    // decision happens deep in the app, post-first-cleanup.
+    // Onboarding is followed by the two-step permission flow, then the
+    // mandatory paywall. Every step is a pushReplacement so the user can't
+    // back-gesture out of the funnel.
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const WelcomeScreen(),
+        pageBuilder: (_, __, ___) => const PermissionScreen(),
         transitionDuration: const Duration(milliseconds: 340),
         reverseTransitionDuration: const Duration(milliseconds: 220),
         transitionsBuilder: (_, animation, __, child) {

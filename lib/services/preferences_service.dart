@@ -13,8 +13,6 @@ class PreferencesService {
   static const _keySwipeHintCount = 'swipe_hint_count';
   static const _keyTrialStartedAt = 'trial_started_at_ms';
   static const _keyTrialReminderScheduled = 'trial_reminder_scheduled';
-  static const _keyCleanupsCompleted = 'cleanups_completed';
-  static const _keyDeepPaywallShown = 'deep_paywall_shown';
 
   late SharedPreferences _prefs;
 
@@ -73,21 +71,4 @@ class PreferencesService {
 
   Future<void> setTrialReminderScheduled(bool value) =>
       _prefs.setBool(_keyTrialReminderScheduled, value);
-
-  // ─── Cleanup counter ──────────────────────────────────────────────────────
-  // Incremented every time the user finalizes a cleanup with ≥1 photo
-  // actually deleted. Used to delay the deep paywall until the user has
-  // tasted the value of the app.
-  int get cleanupsCompleted => _prefs.getInt(_keyCleanupsCompleted) ?? 0;
-  Future<void> incrementCleanupsCompleted() =>
-      _prefs.setInt(_keyCleanupsCompleted, cleanupsCompleted + 1);
-
-  // ─── Deep paywall ─────────────────────────────────────────────────────────
-  // Flipped to true the first time the deep-in-app paywall fires. Prevents
-  // re-triggering automatically; the user can still reach the paywall via
-  // Settings → FlickClean Pro.
-  bool get deepPaywallShown =>
-      _prefs.getBool(_keyDeepPaywallShown) ?? false;
-  Future<void> setDeepPaywallShown(bool value) =>
-      _prefs.setBool(_keyDeepPaywallShown, value);
 }
