@@ -9,17 +9,23 @@ import '../services/analytics_service.dart';
 import '../services/notification_service.dart';
 import '../services/purchase_service.dart';
 
-/// FlickClean's mandatory trial paywall.
+/// FlickClean's mandatory subscription paywall.
 ///
 /// Layout, top → bottom:
-///   1. Hero copy framing the 3-day free trial
-///   2. Vertical animated timeline showing Day 1 / Day 2 / Day 3
-///   3. Two plan tiles. Tapping a tile is the purchase action — no
-///      separate Continue button. The tap calls
-///      `Purchases.purchasePackage(...)`, which surfaces Apple's native
-///      StoreKit confirmation sheet (with the intro-offer details Apple
-///      auto-renders from App Store Connect). On success we replace the
-///      route stack with /home.
+///   1. Hero copy that adapts to the currently selected plan.
+///   2. **Conditional** details panel:
+///        • Weekly selected → animated 3-day trial timeline.
+///        • Yearly selected → "starts immediately, no trial" card.
+///      The two cross-fade as the user toggles between plans.
+///   3. Two plan tiles with radio selection.
+///        • Weekly: 3-day trial, then weekly billing.
+///        • Yearly: direct annual purchase, no trial.
+///      Tap = select (timeline + hero + CTA all react instantly).
+///   4. One primary CTA whose wording adapts to the selection. The CTA
+///      calls `Purchases.purchasePackage(...)`, which raises Apple's
+///      native StoreKit confirmation sheet — that's where the trial /
+///      pricing terms come from (driven by App Store Connect config).
+///      On success we replace the route stack with /home.
 ///
 /// Onboarding/launch-gate presentations are blocking — no close button,
 /// no back gesture. From `PaywallSource.settings` we honour close + pop.
@@ -44,6 +50,7 @@ class _PaywallScreenState extends State<PaywallScreen>
   final _service = PurchaseService.instance;
 
   Offering? _offering;
+  Package? _selected;
   bool _loadingOfferings = true;
   String? _purchasingId;
   bool _restoring = false;
@@ -123,6 +130,7 @@ class _PaywallScreenState extends State<PaywallScreen>
     if (cached != null && (cached.weekly != null || cached.annual != null)) {
       setState(() {
         _offering = cached;
+        _selected = _defaultSelection(cached);
         _loadingOfferings = false;
       });
       return;
@@ -131,6 +139,7 @@ class _PaywallScreenState extends State<PaywallScreen>
     if (!mounted) return;
     setState(() {
       _offering = fetched;
+      _selected = fetched != null ? _defaultSelection(fetched) : null;
       _loadingOfferings = false;
       if (fetched == null ||
           (fetched.weekly == null && fetched.annual == null)) {
@@ -138,6 +147,29 @@ class _PaywallScreenState extends State<PaywallScreen>
       }
     });
   }
+
+  /// Weekly is the lead — surfacing the trial up-front maximises conversion
+  /// and lets the user see the timeline by default. Falls back to yearly if
+  /// weekly isn't configured.
+  Package? _defaultSelection(Offering offering) {
+    return offering.weekly ?? offering.annual;
+  }
+
+  /// Switch the focused plan. Updates the timeline / hero / CTA. When the
+  /// user moves *back* to weekly we replay the timeline so the reveal feels
+  /// intentional rather than showing a finished, frozen rail.
+  void _selectPlan(Package pkg) {
+    if (_selected?.identifier == pkg.identifier) return;
+    HapticFeedback.selectionClick();
+    final wasYearly = _selected?.packageType == PackageType.annual;
+    setState(() => _selected = pkg);
+    if (pkg.packageType == PackageType.weekly && wasYearly) {
+      _timeline.forward(from: 0);
+    }
+  }
+
+  bool get _isWeeklySelected =>
+      _selected?.packageType == PackageType.weekly;
 
   String _describeOfferingProblem() {
     final err = _service.lastError;
@@ -150,11 +182,13 @@ class _PaywallScreenState extends State<PaywallScreen>
   }
 
   // ─── Purchase ───────────────────────────────────────────────────────────
-  // Tapping a plan tile is itself the purchase action. We dispatch
-  // straight into RevenueCat, which raises Apple's native StoreKit sheet —
-  // that sheet is what shows "3 days free, then $X" and collects the
-  // confirmation. We don't simulate Apple's UI in our own.
-  Future<void> _purchase(Package pkg) async {
+  // Triggered from the single primary CTA at the bottom of the sheet,
+  // whichever plan is currently selected. RevenueCat raises Apple's
+  // native StoreKit confirmation sheet — that sheet is what shows the
+  // trial / pricing terms (driven by App Store Connect config).
+  Future<void> _onSubscribePressed() async {
+    final pkg = _selected;
+    if (pkg == null) return;
     if (_purchasingId != null || _restoring) return;
     HapticFeedback.mediumImpact();
     setState(() {
@@ -294,12 +328,14 @@ class _PaywallScreenState extends State<PaywallScreen>
       children: [
         const SizedBox(height: 8),
         _buildHero(),
-        const SizedBox(height: 26),
-        _Timeline(controller: _timeline),
-        const SizedBox(height: 28),
+        const SizedBox(height: 22),
+        _buildConditionalDetails(),
+        const SizedBox(height: 24),
         _buildPlans(),
         const SizedBox(height: 16),
         _buildErrorBanner(),
+        _buildPrimaryCta(),
+        const SizedBox(height: 14),
         _buildTrustRow(),
         const SizedBox(height: 14),
         _buildFinePrint(),
@@ -307,8 +343,47 @@ class _PaywallScreenState extends State<PaywallScreen>
     );
   }
 
+  /// Switches between the animated 3-day trial timeline (weekly) and the
+  /// "starts immediately, no trial" card (yearly). Smooth crossfade so the
+  /// shift feels intentional, not jarring.
+  Widget _buildConditionalDetails() {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) {
+        return FadeTransition(
+          opacity: animation,
+          child: SizeTransition(
+            sizeFactor: animation,
+            axisAlignment: -1,
+            child: child,
+          ),
+        );
+      },
+      child: _isWeeklySelected
+          ? _Timeline(
+              key: const ValueKey('timeline'),
+              controller: _timeline,
+            )
+          : const _YearlyStart(key: ValueKey('yearly-start')),
+    );
+  }
+
   // ─── Hero ───────────────────────────────────────────────────────────────
+  // Title + subtitle adapt to the currently selected plan so the headline
+  // always reflects what the user is considering. We use AnimatedSwitcher
+  // for a calm crossfade so the swap reads as a smooth update rather than
+  // a flicker.
   Widget _buildHero() {
+    final isWeekly = _isWeeklySelected;
+    final title = isWeekly
+        ? 'Try FlickClean free\nfor 3 days'
+        : 'Unlock FlickClean\nfor a full year';
+    final subtitle = isWeekly
+        ? "Here's how your trial works. Cancel anytime — no questions asked."
+        : 'Full access from day one. No trial — your annual plan starts immediately.';
+
     return Column(
       children: [
         Container(
@@ -333,27 +408,39 @@ class _PaywallScreenState extends State<PaywallScreen>
               color: Colors.white, size: 32),
         ),
         const SizedBox(height: 18),
-        const Text(
-          'Try FlickClean free\nfor 3 days',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 26,
-            fontWeight: FontWeight.w700,
-            height: 1.15,
-            letterSpacing: -0.4,
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          transitionBuilder: (c, a) =>
+              FadeTransition(opacity: a, child: c),
+          child: Text(
+            title,
+            key: ValueKey(title),
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 26,
+              fontWeight: FontWeight.w700,
+              height: 1.15,
+              letterSpacing: -0.4,
+            ),
           ),
         ),
         const SizedBox(height: 8),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 8),
-          child: Text(
-            "Here's how your trial works. Cancel anytime — no questions asked.",
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: _muted,
-              fontSize: 14,
-              height: 1.45,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (c, a) =>
+                FadeTransition(opacity: a, child: c),
+            child: Text(
+              subtitle,
+              key: ValueKey(subtitle),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: _muted,
+                fontSize: 14,
+                height: 1.45,
+              ),
             ),
           ),
         ),
@@ -401,6 +488,8 @@ class _PaywallScreenState extends State<PaywallScreen>
     }
 
     final savings = _yearlySavingsPercent(weekly, annual);
+    final selectedId = _selected?.identifier;
+    final busy = _purchasingId != null || _restoring;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -408,29 +497,80 @@ class _PaywallScreenState extends State<PaywallScreen>
         if (annual != null)
           _PlanTile(
             label: 'Yearly',
-            priceTagline: '3 days free, then ${annual.storeProduct.priceString} / year',
+            priceTagline:
+                '${annual.storeProduct.priceString} / year · billed upfront',
             secondaryTagline: _perWeekFromAnnual(annual) != null
-                ? 'Just ${_perWeekFromAnnual(annual)} / week'
+                ? 'Just ${_perWeekFromAnnual(annual)} per week'
                 : null,
             badge: savings != null
                 ? 'BEST VALUE · SAVE $savings%'
                 : 'BEST VALUE',
             highlight: true,
-            loading: _purchasingId == annual.identifier,
-            anyLoading: _purchasingId != null || _restoring,
-            onTap: () => _purchase(annual),
+            selected: selectedId == annual.identifier,
+            disabled: busy,
+            onTap: () => _selectPlan(annual),
           ),
         if (weekly != null && annual != null) const SizedBox(height: 10),
         if (weekly != null)
           _PlanTile(
             label: 'Weekly',
-            priceTagline: '3 days free, then ${weekly.storeProduct.priceString} / week',
+            priceTagline:
+                '3 days free, then ${weekly.storeProduct.priceString} / week',
             highlight: false,
-            loading: _purchasingId == weekly.identifier,
-            anyLoading: _purchasingId != null || _restoring,
-            onTap: () => _purchase(weekly),
+            selected: selectedId == weekly.identifier,
+            disabled: busy,
+            onTap: () => _selectPlan(weekly),
           ),
       ],
+    );
+  }
+
+  // ─── Primary CTA ────────────────────────────────────────────────────────
+  // Single bottom button. Wording adapts to the selected plan so the user
+  // always knows what tapping it does.
+  Widget _buildPrimaryCta() {
+    if (_loadingOfferings || _selected == null) {
+      return const SizedBox.shrink();
+    }
+    final isWeekly = _isWeeklySelected;
+    final label =
+        isWeekly ? 'Start 3-Day Free Trial' : 'Subscribe Yearly';
+    final busy = _purchasingId != null;
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: ElevatedButton(
+        onPressed: busy ? null : _onSubscribePressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: _accent,
+          disabledBackgroundColor: _accent.withOpacity(0.4),
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          elevation: 0,
+        ),
+        child: busy
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  color: Colors.white,
+                  strokeWidth: 2.4,
+                ),
+              )
+            : AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                child: Text(
+                  label,
+                  key: ValueKey(label),
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+      ),
     );
   }
 
@@ -481,13 +621,30 @@ class _PaywallScreenState extends State<PaywallScreen>
   }
 
   Widget _buildFinePrint() {
+    final pkg = _selected;
+    final isWeekly = _isWeeklySelected;
+    final priceLabel = pkg?.storeProduct.priceString ?? '';
+    final summary = pkg == null
+        ? 'Cancel anytime in your Apple account settings.'
+        : isWeekly
+            ? 'Free for 3 days, then $priceLabel/week renews automatically until cancelled. '
+                'Cancel anytime in your Apple account settings.'
+            : '$priceLabel billed upfront. Renews yearly until cancelled. '
+                'No trial. Cancel anytime in your Apple account settings.';
+
     return Column(
       children: [
-        const Text(
-          'Free for 3 days, then your chosen plan renews automatically until you cancel. '
-          'Cancel anytime in your Apple account settings.',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: _muted, fontSize: 11.5, height: 1.45),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          transitionBuilder: (c, a) =>
+              FadeTransition(opacity: a, child: c),
+          child: Text(
+            summary,
+            key: ValueKey(summary),
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+                color: _muted, fontSize: 11.5, height: 1.45),
+          ),
         ),
         const SizedBox(height: 10),
         Row(
@@ -522,7 +679,7 @@ class _PaywallScreenState extends State<PaywallScreen>
 // fades in at a staggered interval so the progression reads like a story.
 class _Timeline extends StatelessWidget {
   final AnimationController controller;
-  const _Timeline({required this.controller});
+  const _Timeline({super.key, required this.controller});
 
   static const Color _accent = Color(0xFF6B4EFF);
   static const Color _check = Color(0xFF30D158);
@@ -763,22 +920,25 @@ class _TimelineRailPainter extends CustomPainter {
 }
 
 // ─── Plan tile ────────────────────────────────────────────────────────────────
+// Selectable, not auto-purchase. Tap = "I'm considering this plan" so the
+// hero + timeline + CTA update. The actual purchase fires from the
+// centralised CTA below the tiles.
 class _PlanTile extends StatelessWidget {
   final String label;
   final String priceTagline;
   final String? secondaryTagline;
   final String? badge;
   final bool highlight;
-  final bool loading;
-  final bool anyLoading;
+  final bool selected;
+  final bool disabled;
   final VoidCallback onTap;
 
   const _PlanTile({
     required this.label,
     required this.priceTagline,
     required this.highlight,
-    required this.loading,
-    required this.anyLoading,
+    required this.selected,
+    required this.disabled,
     required this.onTap,
     this.secondaryTagline,
     this.badge,
@@ -791,52 +951,64 @@ class _PlanTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final borderColor = highlight
-        ? _accent.withOpacity(0.65)
-        : const Color(0xFF26262C);
-    final bg = highlight ? _accent.withOpacity(0.10) : _surface;
-    final disabled = anyLoading && !loading;
+    final borderColor = selected
+        ? _accent
+        : highlight
+            ? _accent.withOpacity(0.55)
+            : const Color(0xFF26262C);
+    final bg = selected
+        ? _accent.withOpacity(0.16)
+        : highlight
+            ? _accent.withOpacity(0.08)
+            : _surface;
+    final borderWidth = selected ? 2.0 : 1.3;
 
     return Opacity(
       opacity: disabled ? 0.55 : 1.0,
       child: GestureDetector(
-        onTap: anyLoading ? null : onTap,
+        onTap: disabled ? null : onTap,
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOut,
           padding: EdgeInsets.fromLTRB(
-              16, badge != null ? 12 : 16, 16, 16),
+              14, badge != null ? 12 : 16, 16, 16),
           decoration: BoxDecoration(
             color: bg,
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: borderColor, width: 1.4),
+            border: Border.all(color: borderColor, width: borderWidth),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (badge != null) ...[
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: _accent,
-                    borderRadius: BorderRadius.circular(7),
-                  ),
-                  child: Text(
-                    badge!,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.6,
+                Padding(
+                  padding: const EdgeInsets.only(left: 36),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 9, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: _accent,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Text(
+                      badge!,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                      ),
                     ),
                   ),
                 ),
                 const SizedBox(height: 10),
               ],
               Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
+                  _RadioDot(selected: selected),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -871,8 +1043,6 @@ class _PlanTile extends StatelessWidget {
                       ],
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  _Trailing(loading: loading),
                 ],
               ),
             ],
@@ -883,36 +1053,132 @@ class _PlanTile extends StatelessWidget {
   }
 }
 
-class _Trailing extends StatelessWidget {
-  final bool loading;
-  const _Trailing({required this.loading});
+class _RadioDot extends StatelessWidget {
+  final bool selected;
+  const _RadioDot({required this.selected});
+
+  static const Color _accent = Color(0xFF6B4EFF);
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 34,
-      height: 34,
-      child: Center(
-        child: loading
-            ? const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  color: Color(0xFF8B7BFF),
-                  strokeWidth: 2.4,
-                ),
-              )
-            : Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xFF6B4EFF).withOpacity(0.16),
-                ),
-                child: const Icon(Icons.arrow_forward_rounded,
-                    color: Color(0xFF8B7BFF), size: 18),
-              ),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+      width: 24,
+      height: 24,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected ? _accent : Colors.transparent,
+        border: Border.all(
+          color: selected ? _accent : const Color(0xFF3A3A3C),
+          width: 2,
+        ),
       ),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 180),
+        child: selected
+            ? const Icon(Icons.check_rounded,
+                key: ValueKey('on'), color: Colors.white, size: 15)
+            : const SizedBox(key: ValueKey('off')),
+      ),
+    );
+  }
+}
+
+// ─── Yearly "start immediately" card ──────────────────────────────────────
+// Replaces the trial timeline when the user is considering the yearly
+// plan. Keeps the visual block height roughly comparable to the timeline
+// so the page doesn't feel like it collapses on the swap.
+class _YearlyStart extends StatelessWidget {
+  const _YearlyStart({super.key});
+
+  static const Color _accent = Color(0xFF6B4EFF);
+  static const Color _accentSoft = Color(0xFF8B7BFF);
+  static const Color _surface = Color(0xFF15151A);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(18),
+        border:
+            Border.all(color: _accent.withOpacity(0.35), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: _accent.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: const Icon(Icons.rocket_launch_rounded,
+                    color: _accentSoft, size: 20),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Start immediately with full access',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const _YearlyPoint(
+            icon: Icons.bolt_rounded,
+            text: 'Premium unlocks the moment you confirm with Apple.',
+          ),
+          const SizedBox(height: 10),
+          const _YearlyPoint(
+            icon: Icons.event_busy_rounded,
+            text:
+                'No trial period — this is a direct annual purchase, billed upfront.',
+          ),
+          const SizedBox(height: 10),
+          const _YearlyPoint(
+            icon: Icons.savings_rounded,
+            text: 'One predictable payment for a year of FlickClean.',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _YearlyPoint extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _YearlyPoint({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: const Color(0xFF8B7BFF), size: 16),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(
+              color: Color(0xFFB7B9BD),
+              fontSize: 12.8,
+              height: 1.45,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
