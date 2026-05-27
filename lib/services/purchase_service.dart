@@ -8,6 +8,26 @@ import 'package:purchases_flutter/purchases_flutter.dart';
 import 'notification_service.dart';
 import 'preferences_service.dart';
 
+/// Outcome of a [PurchaseService.purchase] attempt.
+///
+/// Distinguishes a genuine user cancellation from a purchase that completed
+/// at StoreKit but whose entitlement hasn't propagated yet. These two cases
+/// used to be conflated as a bare `false` and were mislabelled as
+/// cancellations in analytics, inflating the cancel rate.
+enum PurchaseOutcome {
+  /// The 'pro' entitlement is active — the user is now subscribed.
+  purchased,
+
+  /// The user dismissed Apple's StoreKit sheet without paying.
+  cancelled,
+
+  /// purchasePackage returned without throwing, but the 'pro' entitlement
+  /// was not active when we checked. Almost always a sandbox/StoreKit
+  /// propagation lag; the async CustomerInfo listener may flip the user to
+  /// pro shortly after. Explicitly *not* a cancellation.
+  pending,
+}
+
 /// Wraps RevenueCat. Single source of truth for paywall state.
 ///
 /// Listen to this notifier from the UI to react to entitlement changes —
@@ -129,10 +149,19 @@ class PurchaseService extends ChangeNotifier {
     }
   }
 
-  /// Attempts to purchase [package]. Returns true if the user is now pro.
-  /// User-cancelled purchases return false without throwing.
-  Future<bool> purchase(Package package) async {
-    if (!_supportedPlatform) return false;
+  /// Attempts to purchase [package]. The returned [PurchaseOutcome]
+  /// distinguishes three cases that callers must treat differently:
+  ///   • [PurchaseOutcome.purchased] — the 'pro' entitlement is now active.
+  ///   • [PurchaseOutcome.cancelled] — the user dismissed Apple's StoreKit
+  ///     sheet without paying.
+  ///   • [PurchaseOutcome.pending]   — StoreKit returned without throwing but
+  ///     the entitlement hasn't settled yet (sandbox/propagation lag); not a
+  ///     cancellation. The async customerInfo listener may still flip isPro.
+  /// Non-cancellation purchase errors are rethrown for the caller to handle.
+  Future<PurchaseOutcome> purchase(Package package) async {
+    // Non-mobile platforms can't purchase; treat as a no-op cancellation so
+    // the caller simply stays put (matches the pre-refactor behaviour).
+    if (!_supportedPlatform) return PurchaseOutcome.cancelled;
     debugPrint(
         '[PurchaseService] purchase() start id=${package.identifier} type=${package.packageType}');
     try {
@@ -140,12 +169,12 @@ class PurchaseService extends ChangeNotifier {
       _applyCustomerInfo(result);
       debugPrint(
           '[PurchaseService] purchase() returned. isPro=$_isPro isInTrial=$_isInTrial');
-      return _isPro;
+      return _isPro ? PurchaseOutcome.purchased : PurchaseOutcome.pending;
     } on PlatformException catch (e) {
       final code = PurchasesErrorHelper.getErrorCode(e);
       if (code == PurchasesErrorCode.purchaseCancelledError) {
         debugPrint('[PurchaseService] purchase() cancelled by user');
-        return false;
+        return PurchaseOutcome.cancelled;
       }
       debugPrint('[PurchaseService] purchase() failed: $code — ${e.message}');
       rethrow;

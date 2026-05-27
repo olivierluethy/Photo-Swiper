@@ -5,8 +5,9 @@ import 'package:flutter/services.dart';
 import '../services/analytics_service.dart';
 
 /// Benefits showcase shown after permissions and before the paywall. We
-/// celebrate the user, then list everything they can do "for free" before
-/// presenting the trial timeline + plan tiles.
+/// celebrate the user, list what they'll unlock, and honestly set up the
+/// 3-day free trial that the paywall presents next — no "free forever"
+/// claims that the mandatory paywall would immediately contradict.
 ///
 /// This is a distinct step in the navigation — not part of the paywall —
 /// so the moment lands as a positive reveal rather than a sales pitch.
@@ -156,7 +157,7 @@ class _BenefitsScreenState extends State<BenefitsScreen>
         ),
         const SizedBox(height: 20),
         const Text(
-          'You can now use this app\nfor free',
+          'Start with a\n3-day free trial',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: Colors.white,
@@ -170,8 +171,8 @@ class _BenefitsScreenState extends State<BenefitsScreen>
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 8),
           child: Text(
-            "You're all set — here's everything you can do with FlickClean, "
-            'with no limitations.',
+            "You're all set — here's everything you'll unlock with FlickClean. "
+            'Try it all free for 3 days, cancel anytime.',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: _muted,
@@ -219,7 +220,8 @@ class _BenefitsScreenState extends State<BenefitsScreen>
           SizedBox(width: 10),
           Expanded(
             child: Text(
-              'You can now use this app completely free with no limitations.',
+              'Full access free for 3 days. Cancel anytime before it ends '
+              "and you won't be charged.",
               style: TextStyle(
                 color: Color(0xFFD7E9DC),
                 fontSize: 12.8,
@@ -249,7 +251,7 @@ class _BenefitsScreenState extends State<BenefitsScreen>
           elevation: 0,
         ),
         child: const Text(
-          'Great, Let Me Start For Free',
+          'Start My Free Trial',
           style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
         ),
       ),
