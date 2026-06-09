@@ -63,6 +63,21 @@ class _PaywallScreenState extends State<PaywallScreen>
   // the sync return value can't both fire navigation. Independent from
   // _converted (which gates analytics + onboarding completion).
   bool _navigated = false;
+  // Set to true the instant we emit the purchase-success analytics. Because
+  // a single successful purchase can surface via *both* the synchronous
+  // purchase() return value and the async entitlement listener, this guard
+  // guarantees subscription_started / *_plan_purchased / funnel_step_purchase
+  // fire exactly once per purchase.
+  bool _purchaseSuccessTracked = false;
+  // Set to true the instant we ask for notification permission off the back
+  // of a trial start, so the prompt is requested at most once per purchase
+  // whether the success surfaced synchronously or via the async listener.
+  bool _trialNotificationRequested = false;
+  // The package whose purchase returned PurchaseOutcome.pending — i.e. Apple
+  // accepted it but the 'pro' entitlement hadn't propagated yet. Lets the
+  // async entitlement listener attribute the delayed-success analytics to
+  // the right plan when the entitlement finally lands.
+  Package? _pendingPurchasePkg;
   final DateTime _shownAt = DateTime.now();
 
   // Scroll listener: emits at most one paywall_scrolled event per
@@ -202,8 +217,74 @@ class _PaywallScreenState extends State<PaywallScreen>
           '[PaywallScreen] async entitlement update — isPro=true, navigating');
       _converted = true;
       _convertedViaTrial = _service.isInTrial;
+      // Delayed-success rescue: if this activation follows a purchase that
+      // returned `pending`, emit the same success analytics the synchronous
+      // path would have, attributed to the package that was bought. Restores
+      // and pre-existing entitlements leave _pendingPurchasePkg null, so they
+      // don't get mislabelled as a fresh purchase here. _trackPurchaseSuccess
+      // is idempotent, so a sync success that also pinged the listener can't
+      // double-count.
+      final pendingPkg = _pendingPurchasePkg;
+      if (pendingPkg != null) {
+        debugPrint(
+            '[PaywallScreen] delayed-success rescue — emitting purchase-success analytics');
+        _trackPurchaseSuccess(pendingPkg);
+        // Parity with the synchronous trial-success path: a delayed trial
+        // start should also prompt for notifications so the Day-3 reminder
+        // can fire. Gated to genuine delayed purchases (pendingPkg != null),
+        // so restores / pre-existing entitlements never reach it.
+        _maybeRequestTrialNotificationPermission();
+      }
       unawaited(_exitOnSuccess());
     }
+  }
+
+  /// Requests notification permission so the Day-3 trial-ending reminder can
+  /// be shown. Fires at most once per purchase and only when the user just
+  /// started a *trial*. Called from both the synchronous trial-success path
+  /// and the async delayed-success rescue; restores and pre-existing
+  /// entitlements never run the purchase-success flow, so they can't trigger
+  /// it.
+  void _maybeRequestTrialNotificationPermission() {
+    if (_trialNotificationRequested || !_convertedViaTrial) return;
+    _trialNotificationRequested = true;
+    unawaited(NotificationService.instance.requestPermission());
+  }
+
+  /// Emits the purchase-success analytics exactly once per purchase. Shared
+  /// by the synchronous `purchased` path and the async entitlement-rescue
+  /// listener; the [_purchaseSuccessTracked] guard makes a delayed success
+  /// and a synchronous success mutually exclusive in the data.
+  void _trackPurchaseSuccess(Package pkg) {
+    if (_purchaseSuccessTracked) return;
+    _purchaseSuccessTracked = true;
+
+    final tier = _tierFor(pkg);
+    final framedAsTrial = pkg.packageType == PackageType.weekly;
+    final commonPurchaseProps = <String, Object>{
+      'tier': tier,
+      'framed_as_trial': framedAsTrial,
+      'in_trial': _service.isInTrial,
+      'purchase_price': pkg.storeProduct.price,
+      'currency': pkg.storeProduct.currencyCode,
+      'source': widget.source.name,
+    };
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.subscriptionStarted,
+      properties: commonPurchaseProps,
+    ));
+    unawaited(AnalyticsService.instance.track(
+      framedAsTrial
+          ? AnalyticsEvents.weeklyPlanPurchased
+          : AnalyticsEvents.yearlyPlanPurchased,
+      properties: commonPurchaseProps,
+    ));
+    unawaited(AnalyticsService.instance.funnelStep(
+      FunnelSteps.purchase,
+      event: AnalyticsEvents.funnelStepPurchase,
+      status: 'completed',
+      extras: {'plan_type': tier},
+    ));
   }
 
   // ─── Loading ────────────────────────────────────────────────────────────
@@ -288,6 +369,16 @@ class _PaywallScreenState extends State<PaywallScreen>
     });
 
     final framedAsTrial = pkg.packageType == PackageType.weekly;
+    final planType = framedAsTrial ? 'weekly' : 'yearly';
+
+    // Capture the plan the user is actually proceeding to purchase with —
+    // including the pre-selected default. weekly/yearly_plan_tapped only fire
+    // on a selection *change*, so they miss users who buy the default; this
+    // event makes the funnel reflect real purchase intent.
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.planSelectedAtPurchase,
+      properties: {'plan_type': planType},
+    ));
 
     // Apple's native StoreKit dialog appears as a result of the
     // `purchasePackage` call below. The dashboard distinguishes between
@@ -303,64 +394,57 @@ class _PaywallScreenState extends State<PaywallScreen>
     ));
 
     try {
-      final success = await _service.purchase(pkg);
+      final outcome = await _service.purchase(pkg);
       debugPrint(
-          '[PaywallScreen] purchase() returned success=$success service.isPro=${_service.isPro}');
+          '[PaywallScreen] purchase() outcome=$outcome service.isPro=${_service.isPro}');
       if (!mounted) return;
-      if (success) {
+      if (outcome == PurchaseOutcome.purchased) {
         _converted = true;
         _convertedViaTrial = _service.isInTrial;
 
-        final tier = _tierFor(pkg);
-        final commonPurchaseProps = <String, Object>{
-          'tier': tier,
-          'framed_as_trial': framedAsTrial,
-          'in_trial': _service.isInTrial,
-          'purchase_price': pkg.storeProduct.price,
-          'currency': pkg.storeProduct.currencyCode,
-          'source': widget.source.name,
-        };
-        unawaited(AnalyticsService.instance.track(
-          AnalyticsEvents.subscriptionStarted,
-          properties: commonPurchaseProps,
-        ));
-        unawaited(AnalyticsService.instance.track(
-          framedAsTrial
-              ? AnalyticsEvents.weeklyPlanPurchased
-              : AnalyticsEvents.yearlyPlanPurchased,
-          properties: commonPurchaseProps,
-        ));
-        unawaited(AnalyticsService.instance.funnelStep(
-          FunnelSteps.purchase,
-          event: AnalyticsEvents.funnelStepPurchase,
-          status: 'completed',
-          extras: {'plan_type': tier},
-        ));
+        _trackPurchaseSuccess(pkg);
         HapticFeedback.heavyImpact();
 
-        if (_convertedViaTrial) {
-          unawaited(NotificationService.instance.requestPermission());
-        }
+        _maybeRequestTrialNotificationPermission();
 
         unawaited(_exitOnSuccess());
-      } else {
-        // RevenueCat returns `false` (no exception) when the user dismisses
-        // Apple's StoreKit sheet without paying. The async customerInfo
-        // listener (_onPurchaseServiceChanged) may still rescue this if a
-        // late entitlement update arrives after we land here.
-        debugPrint(
-            '[PaywallScreen] purchase returned false — waiting for possible async entitlement update');
+      } else if (outcome == PurchaseOutcome.cancelled) {
+        // The user dismissed Apple's StoreKit sheet without paying. This is
+        // now the *only* path that logs a cancellation.
+        debugPrint('[PaywallScreen] purchase cancelled by user');
         unawaited(AnalyticsService.instance.track(
           AnalyticsEvents.purchaseCancelled,
           properties: {
-            'plan_type': framedAsTrial ? 'weekly' : 'yearly',
+            'plan_type': planType,
             'source': widget.source.name,
           },
         ));
         unawaited(AnalyticsService.instance.dropOff(
           lastCompletedStep: FunnelSteps.paywall,
           reason: FunnelDropOffReason.paymentCancelled,
-          extras: {'plan_type': framedAsTrial ? 'weekly' : 'yearly'},
+          extras: {'plan_type': planType},
+        ));
+        setState(() => _purchasingId = null);
+      } else {
+        // PurchaseOutcome.pending: StoreKit returned but the 'pro'
+        // entitlement hasn't propagated yet (common in sandbox/TestFlight).
+        // This is NOT a cancellation — we log it distinctly so it can never
+        // inflate purchase_cancelled. The async PurchaseService listener
+        // (_onPurchaseServiceChanged) will navigate the instant the
+        // entitlement settles; we re-enable the CTA without surfacing an
+        // error because the purchase may still resolve to pro.
+        debugPrint(
+            '[PaywallScreen] purchase pending — entitlement not active yet, awaiting async update');
+        // Remember which plan was bought so the async entitlement listener
+        // can attribute the delayed-success analytics correctly when the
+        // 'pro' entitlement finally activates.
+        _pendingPurchasePkg = pkg;
+        unawaited(AnalyticsService.instance.track(
+          AnalyticsEvents.purchaseCompletedEntitlementPending,
+          properties: {
+            'plan_type': planType,
+            'source': widget.source.name,
+          },
         ));
         setState(() => _purchasingId = null);
       }
@@ -371,13 +455,13 @@ class _PaywallScreenState extends State<PaywallScreen>
         AnalyticsEvents.errorOccurred,
         properties: {
           'context': 'paywall_purchase',
-          'plan_type': framedAsTrial ? 'weekly' : 'yearly',
+          'plan_type': planType,
         },
       ));
       unawaited(AnalyticsService.instance.dropOff(
         lastCompletedStep: FunnelSteps.paywall,
         reason: FunnelDropOffReason.purchaseFailed,
-        extras: {'plan_type': framedAsTrial ? 'weekly' : 'yearly'},
+        extras: {'plan_type': planType},
       ));
       setState(() {
         _purchasingId = null;

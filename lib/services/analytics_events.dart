@@ -49,7 +49,20 @@ class AnalyticsEvents {
       'yearly_plan_apple_dialog_shown';
   static const String weeklyPlanPurchased = 'weekly_plan_purchased';
   static const String yearlyPlanPurchased = 'yearly_plan_purchased';
+  // Fired when the user presses the primary CTA to begin a purchase,
+  // carrying the plan selected at that moment. Unlike weekly/yearly_plan_tapped
+  // (which only fire when the selection *changes*), this captures the plan the
+  // user actually proceeds with — including the pre-selected default — so the
+  // funnel reflects real purchase intent.
+  static const String planSelectedAtPurchase = 'plan_selected_at_purchase';
   static const String purchaseCancelled = 'purchase_cancelled';
+  // purchasePackage returned without throwing, but the 'pro' entitlement was
+  // not active when we checked (sandbox/StoreKit propagation lag). This is
+  // NOT a user cancellation — logged distinctly so it never inflates
+  // purchase_cancelled. The async CustomerInfo listener may still flip the
+  // user to pro shortly after.
+  static const String purchaseCompletedEntitlementPending =
+      'purchase_completed_entitlement_pending';
   static const String paywallClosedWithoutPurchase =
       'paywall_closed_without_purchase';
   static const String paywallScrolled = 'paywall_scrolled';
