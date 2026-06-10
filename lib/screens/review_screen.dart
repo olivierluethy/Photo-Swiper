@@ -15,10 +15,23 @@ class ReviewScreen extends StatefulWidget {
   final List<SwipeItem> toDelete;
   final List<SwipeItem> laterItems;
 
+  /// Number of swipes the user performed in the upstream SwipeScreen
+  /// session, or null when entry was via grid-select (no swiping).
+  /// Surfaced on cleanup_completed so the funnel can correlate effort
+  /// with completion.
+  final int? sessionSwipeCount;
+
+  /// Which UI path led the user into review. Tagged on every cleanup
+  /// event the screen emits so the swipe and grid-select funnels can be
+  /// segmented in dashboards.
+  final String entryPath;
+
   const ReviewScreen({
     super.key,
     required this.toDelete,
     required this.laterItems,
+    this.sessionSwipeCount,
+    this.entryPath = 'swipe',
   });
 
   @override
@@ -124,8 +137,40 @@ class _ReviewScreenState extends State<ReviewScreen> {
     final countBefore = _selected.length;
     final bytesBefore = _totalBytes;
 
-    final deleted =
-        await _service.deleteAssets(_selected.map((i) => i.asset).toList());
+    // Mark the moment we hand off to the OS — this is the last point in
+    // the funnel under our control; everything after it is the iOS
+    // PHPhotoLibrary system delete sheet, which is otherwise invisible
+    // to analytics.
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.cleanupSystemDialogInvoked,
+      properties: {
+        'items_to_delete': countBefore,
+        'entry_path': widget.entryPath,
+      },
+    ));
+
+    // deleteAssets now propagates native errors so the caller can tell
+    // "user dismissed the system sheet" (empty list, no throw) apart from
+    // "the native call failed" (throw). Catch here so the existing
+    // success / no-delete navigation flow is preserved. The
+    // [deleteThrew] flag lets the analytics branching below skip the
+    // cancel events when the empty result was actually an error.
+    List<String> deleted = const [];
+    bool deleteThrew = false;
+    try {
+      deleted = await _service
+          .deleteAssets(_selected.map((i) => i.asset).toList());
+    } catch (e) {
+      deleteThrew = true;
+      unawaited(AnalyticsService.instance.track(
+        AnalyticsEvents.cleanupDeleteFailed,
+        properties: {
+          'items_pending': countBefore,
+          'error_type': e.runtimeType.toString(),
+          'entry_path': widget.entryPath,
+        },
+      ));
+    }
 
     if (deleted.isNotEmpty) {
       final deletedIds = deleted.toSet();
@@ -135,6 +180,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
       await ReviewPromptService.instance.recordCleanupCompleted(
         freedBytes: actualFreedBytes,
       );
+      // Legacy success event — kept firing so existing dashboards that
+      // query cleanup_confirmed continue to work unchanged.
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.cleanupConfirmed,
         properties: {
@@ -142,12 +189,40 @@ class _ReviewScreenState extends State<ReviewScreen> {
           'bytes_freed': actualFreedBytes,
         },
       ));
-    } else {
+      // Canonical completion event — this is what the dashboard's
+      // "cleanup_completed" query reads. session_swipe_count is omitted
+      // when the user entered review via grid-select (no swipe session).
+      final completedProps = <String, Object>{
+        'photos_deleted_count': deleted.length,
+        'bytes_freed': actualFreedBytes,
+        'entry_path': widget.entryPath,
+      };
+      if (widget.sessionSwipeCount != null) {
+        completedProps['session_swipe_count'] = widget.sessionSwipeCount!;
+      }
+      unawaited(AnalyticsService.instance.track(
+        AnalyticsEvents.cleanupCompleted,
+        properties: completedProps,
+      ));
+    } else if (!deleteThrew) {
+      // Empty result with no thrown error == user dismissed the iOS
+      // system delete sheet. The legacy cleanup_canceled (cancel_source=
+      // 'system_dialog') is preserved for back-compat alongside the new,
+      // distinctly-named event. When deleteThrew is true the error event
+      // already fired above and we deliberately do NOT also record a
+      // cancel — that's exactly the conflation this change fixes.
       unawaited(AnalyticsService.instance.track(
         AnalyticsEvents.cleanupCanceled,
         properties: {
           'items_pending': countBefore,
           'cancel_source': 'system_dialog',
+        },
+      ));
+      unawaited(AnalyticsService.instance.track(
+        AnalyticsEvents.cleanupSystemDialogCancelled,
+        properties: {
+          'items_pending': countBefore,
+          'entry_path': widget.entryPath,
         },
       ));
     }
@@ -169,6 +244,21 @@ class _ReviewScreenState extends State<ReviewScreen> {
   }
 
   void _finishWithoutDeletion() {
+    // Fires for every exit-without-deletion: 'Keep everything' button,
+    // 'Nothing to Delete' continue, the close button when toDelete is
+    // empty, and the "selected zero items then tapped delete" branch in
+    // _confirmDelete. items_finally_selected==0 with
+    // items_originally_marked>0 means the user actively deselected
+    // everything; equal counts means they reached this exit while
+    // leaving the default selection alone.
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.cleanupReviewFinishedNoDelete,
+      properties: {
+        'items_originally_marked': widget.toDelete.length,
+        'items_finally_selected': _selected.length,
+        'entry_path': widget.entryPath,
+      },
+    ));
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(

@@ -281,6 +281,10 @@ class _SwipeScreenState extends State<SwipeScreen> {
     unawaited(AnalyticsService.instance.track(
       AnalyticsEvents.swipePerformed,
       properties: {
+        // 'direction' is the key the dashboard reads; 'decision' is kept
+        // alongside as a back-compat alias for any chart that already
+        // queried it.
+        'direction': decision.name,
         'decision': decision.name,
         'position_in_session': positionBeforeSwipe,
         'mode': widget.mode.name,
@@ -351,6 +355,8 @@ class _SwipeScreenState extends State<SwipeScreen> {
         builder: (_) => ReviewScreen(
           toDelete: toDelete,
           laterItems: laterItems,
+          sessionSwipeCount: _swipesThisSession,
+          entryPath: 'swipe',
         ),
       ),
     );
@@ -379,6 +385,8 @@ class _SwipeScreenState extends State<SwipeScreen> {
         builder: (_) => ReviewScreen(
           toDelete: toDelete,
           laterItems: laterItems,
+          sessionSwipeCount: _swipesThisSession,
+          entryPath: 'swipe',
         ),
       ),
     );

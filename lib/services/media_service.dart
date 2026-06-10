@@ -229,13 +229,20 @@ class MediaService {
 
   // ─── Delete ──────────────────────────────────────────────────────────────────
 
+  /// Deletes the given assets via the platform photo library.
+  ///
+  /// On iOS this presents the PHPhotoLibrary system delete sheet; the user
+  /// can dismiss it, in which case the native call returns an empty list.
+  /// The empty-list result is a *cancel*, not an error.
+  ///
+  /// Errors thrown by the native call are NOT swallowed — they propagate so
+  /// the caller can distinguish "user cancelled" (empty result, no throw)
+  /// from "native failure" (throw). Without this distinction the analytics
+  /// funnel would conflate the two, which previously made cancel rates look
+  /// artificially high.
   Future<List<String>> deleteAssets(List<AssetEntity> assets) async {
-    if (assets.isEmpty) return [];
-    try {
-      final ids = assets.map((a) => a.id).toList();
-      return await PhotoManager.editor.deleteWithIds(ids);
-    } catch (_) {
-      return [];
-    }
+    if (assets.isEmpty) return const [];
+    final ids = assets.map((a) => a.id).toList();
+    return await PhotoManager.editor.deleteWithIds(ids);
   }
 }

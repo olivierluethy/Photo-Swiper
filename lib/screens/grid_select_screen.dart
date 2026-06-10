@@ -167,7 +167,11 @@ class _GridSelectScreenState extends State<GridSelectScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => ReviewScreen(toDelete: toDelete, laterItems: const []),
+        builder: (_) => ReviewScreen(
+          toDelete: toDelete,
+          laterItems: const [],
+          entryPath: 'grid_select',
+        ),
       ),
     );
   }
