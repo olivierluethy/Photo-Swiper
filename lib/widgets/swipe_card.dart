@@ -23,6 +23,11 @@ class SwipeCard extends StatefulWidget {
   ///   0  → user has swiped enough; nudge never fires.
   final double hintOpacity;
 
+  /// Called when a gesture is dropped because the card is mid fly-off
+  /// (committing the previous decision). [reason] is currently always
+  /// `'locked'`. Fire-and-forget instrumentation; never blocks the gesture.
+  final void Function(String reason)? onInputIgnored;
+
   const SwipeCard({
     super.key,
     required this.child,
@@ -31,6 +36,7 @@ class SwipeCard extends StatefulWidget {
     this.leftHandedMode = false,
     this.isZoomed = false,
     this.hintOpacity = 0.0,
+    this.onInputIgnored,
   });
 
   @override
@@ -43,6 +49,7 @@ class _SwipeCardState extends State<SwipeCard> with TickerProviderStateMixin {
 
   double _offset = 0;
   bool _locked  = false; // true while fly-off or snap-back animates
+  bool _snappingBack = false; // true only while a (cancelable) snap-back runs
   bool _nudging = false; // true while nudge sequence is running
   bool _nudgePlayed = false; // at most one nudge per card instance
   Timer? _idleTimer;
@@ -51,6 +58,13 @@ class _SwipeCardState extends State<SwipeCard> with TickerProviderStateMixin {
   static const double _swipeThresholdVelocity  = 600;
   static const double _nudgeDistance           = 30; // px
   static const Duration _idleDelay             = Duration(seconds: 3);
+
+  // Fly-off commits a decision and must run to completion, so it briefly locks
+  // input — kept short (was 280ms) so fast swipers rarely hit the window.
+  static const Duration _flyOffDuration   = Duration(milliseconds: 160);
+  // Snap-back is a cancelable "return to centre"; a new drag interrupts it
+  // (see _onUpdate), so its duration only affects the resting animation feel.
+  static const Duration _snapBackDuration = Duration(milliseconds: 300);
 
   @override
   void initState() {
@@ -148,13 +162,29 @@ class _SwipeCardState extends State<SwipeCard> with TickerProviderStateMixin {
   // ─── Gesture handlers ────────────────────────────────────────────────────────
 
   void _onUpdate(DragUpdateDetails d) {
-    if (_locked) return;
+    if (_locked) {
+      // A snap-back is cancelable: let a fresh drag take over from the current
+      // offset instead of being silently dropped. A fly-off is a committed
+      // decision and is never interrupted.
+      if (_snappingBack) {
+        _ctrl.stop(canceled: false);
+        _snappingBack = false;
+        _locked = false;
+      } else {
+        return; // fly-off in progress — committed, can't accept this drag.
+      }
+    }
     _cancelIdleTimer(); // any touch cancels the nudge immediately
     setState(() => _offset += d.delta.dx);
   }
 
   void _onEnd(DragEndDetails d) {
-    if (_locked) return;
+    if (_locked) {
+      // Only fly-off reaches here (snap-back is interrupted in _onUpdate before
+      // its end). Record the dropped gesture once, on release.
+      if (!_snappingBack) widget.onInputIgnored?.call('locked');
+      return;
+    }
     _cancelIdleTimer(); // defensive: catch tap-release without prior _onUpdate
     final vx = d.velocity.pixelsPerSecond.dx;
     final shouldSwipe =
@@ -175,7 +205,7 @@ class _SwipeCardState extends State<SwipeCard> with TickerProviderStateMixin {
     final screenW = MediaQuery.of(context).size.width;
     final target  = right ? screenW * 2.0 : -screenW * 2.0;
 
-    _ctrl.duration = const Duration(milliseconds: 280);
+    _ctrl.duration = _flyOffDuration;
     final anim = Tween<double>(begin: _offset, end: target)
         .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeIn));
 
@@ -198,23 +228,29 @@ class _SwipeCardState extends State<SwipeCard> with TickerProviderStateMixin {
 
   Future<void> _snapBack() async {
     _locked = true;
-    _ctrl.duration = const Duration(milliseconds: 420);
+    _snappingBack = true;
+    _ctrl.duration = _snapBackDuration;
     final anim = Tween<double>(begin: _offset, end: 0.0)
         .animate(CurvedAnimation(parent: _ctrl, curve: Curves.elasticOut));
 
     void listener() {
-      if (mounted) setState(() => _offset = anim.value);
+      // Stop driving _offset the moment a new drag interrupts us.
+      if (mounted && _snappingBack) setState(() => _offset = anim.value);
     }
 
     anim.addListener(listener);
     await _ctrl.forward(from: 0);
     anim.removeListener(listener);
 
+    // Interrupted by a fresh drag (_onUpdate cleared the flag and is now
+    // driving _offset) — leave offset/lock untouched and bail.
+    if (!_snappingBack) return;
     if (!mounted) return;
     setState(() {
       _offset = 0;
       _locked = false;
     });
+    _snappingBack = false;
     _ctrl.reset();
     // User is still on this card after a failed swipe — restart the idle timer
     // so the nudge can still play if it hasn't yet.
