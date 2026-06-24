@@ -109,6 +109,12 @@ class AnalyticsEvents {
   //     'position_in_session'  int — 0-based index of the card in view.
   //     'card_image_ready'     bool — was the full card thumbnail decoded
   //                            and cached when the input arrived?
+  //     'low_res_shown'        bool — was the instant low-res placeholder on
+  //                            screen when the input arrived? Splits an
+  //                            'image_not_ready' into "acted on a sharp-enough
+  //                            image" (true) vs "acted on a blank spinner"
+  //                            (false) — the perceived-drop metric for the
+  //                            progressive-image work.
   //     'is_zoomed'            bool — was the card zoomed in at the time?
   //     'reason'               'locked'          — input arrived during the
   //                                                fly-off commit animation
