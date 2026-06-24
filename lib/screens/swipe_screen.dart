@@ -81,6 +81,55 @@ class _SwipeScreenState extends State<SwipeScreen> {
   static const double _stripGap = 6;
   static const double _stripPad = 16;
 
+  // ─── Cache bounding (Fix 1) ─────────────────────────────────────────────────
+  // We keep decoded card thumbnails (and strip-thumb futures) only for a window
+  // of ±_cacheWindow cards around the current index; everything outside is
+  // evicted after each move so memory stays flat over multi-thousand-swipe
+  // sessions. The window must stay strictly greater than the deepest preload
+  // (_maxPreloadAhead) so we never evict a card we are about to show.
+  // Raised from 6 → 10 to cover the deeper velocity-adaptive look-ahead below;
+  // a low-res band of ±10 is still only a few hundred KB, so memory stays flat.
+  static const int _cacheWindow = 10;
+
+  // ─── Velocity-adaptive preload depth (Phase 2) ──────────────────────────────
+  // A fixed +3 lead is outrun by very rapid swipers: a card gets at most
+  // _preloadAhead inter-swipe intervals to decode, and a fast burst makes that
+  // budget shorter than a full-resolution decode. So we widen the look-ahead
+  // when the user swipes fast and let it decay back when they slow down.
+  //
+  // depth = ceil(_preloadRunwayMs / smoothedSwipeIntervalMs), clamped to
+  // [_minPreloadAhead .. _maxPreloadAhead]. _maxPreloadAhead is kept strictly
+  // below _cacheWindow so eviction can never drop a card we are about to show.
+  static const int _minPreloadAhead = 3;
+  static const int _maxPreloadAhead = 8;
+  static const int _preloadRunwayMs = 1400;
+  int _preloadAhead = _minPreloadAhead; // current adaptive depth
+  DateTime? _lastSwipeAt;
+  double? _avgSwipeIntervalMs; // EMA of inter-swipe interval, smooths jitter
+
+  // ─── Card resolution (Fix 2) ────────────────────────────────────────────────
+  // Card thumbnail resolution. Lowered from 900×1200/q92 to 720×960/q88: ~36%
+  // fewer pixels per decode and smaller retained bytes, with no visible loss on
+  // a card that is also shown behind a heavy blur. Centralised so preload and
+  // render always request the *same* size (otherwise the cache would miss).
+  static const int _cardThumbW = 720;
+  static const int _cardThumbH = 960;
+  static const int _cardThumbQuality = 88;
+
+  // ─── Progressive low-res placeholder (Phase 2) ──────────────────────────────
+  // A tiny 200×267 (3:4, matching the card aspect) thumbnail the OS can usually
+  // serve from its pre-generated cache near-instantly. Shown the moment a card
+  // appears so the user always has a sharp-enough image to decide on, then
+  // swapped for the full _cardThumb version (gaplessPlayback) once it decodes.
+  // This means a swipe is never blocked on a full decode — eliminating the
+  // *perceived* dropped swipe regardless of how slow the full decode is.
+  // Evicted by the same ±_cacheWindow band so memory stays flat.
+  static const int _lowResW = 200;
+  static const int _lowResH = 267;
+  static const int _lowResQuality = 70;
+  final Map<String, Uint8List?> _lowResCache = {};
+  final Map<String, Future<Uint8List?>> _lowResFutures = {};
+
   @override
   void initState() {
     super.initState();
@@ -197,8 +246,11 @@ class _SwipeScreenState extends State<SwipeScreen> {
         ));
       }
 
-      // Preload thumbnails for first 3 items
-      for (int i = 0; i < items.length && i < 3; i++) {
+      // Preload the first card plus _preloadAhead more so the opening swipes
+      // never hit a spinner card. Low-res first so a placeholder is ready
+      // instantly, then the full decode upgrades it.
+      for (int i = 0; i < items.length && i <= _preloadAhead; i++) {
+        _preloadLowRes(i);
         _preloadThumb(i);
       }
       // Load file sizes for first 2
@@ -235,8 +287,8 @@ class _SwipeScreenState extends State<SwipeScreen> {
     if (_thumbFutures.containsKey(id)) return;
 
     final future = _items[index].asset.thumbnailDataWithSize(
-      ThumbnailSize(900, 1200),
-      quality: 92,
+      ThumbnailSize(_cardThumbW, _cardThumbH),
+      quality: _cardThumbQuality,
     );
     _thumbFutures[id] = future;
     future.then((bytes) {
@@ -246,6 +298,79 @@ class _SwipeScreenState extends State<SwipeScreen> {
         if (mounted) setState(() {});
       }
     });
+  }
+
+  /// Pre-warm the tiny low-res placeholder for [index] (Phase 2). No-op if it is
+  /// already cached or in flight. Cheap — a 200×267 thumb is tens of KB and the
+  /// OS usually serves it from its pre-generated cache almost instantly.
+  void _preloadLowRes(int index) {
+    if (index >= _items.length) return;
+    final id = _items[index].asset.id;
+    if (_lowResCache.containsKey(id) || _lowResFutures.containsKey(id)) return;
+    _ensureLowResFuture(_items[index]);
+  }
+
+  /// Returns the low-res future for [item], creating and caching it on first
+  /// call. Populates _lowResCache on completion so subsequent renders are a
+  /// synchronous cache hit. The future is left in the map until eviction to
+  /// avoid re-fetch churn during rapid back-and-forth navigation.
+  Future<Uint8List?> _ensureLowResFuture(SwipeItem item) {
+    final id = item.asset.id;
+    return _lowResFutures.putIfAbsent(id, () {
+      final future = item.asset.thumbnailDataWithSize(
+        ThumbnailSize(_lowResW, _lowResH),
+        quality: _lowResQuality,
+      );
+      future.then((bytes) {
+        if (mounted) setState(() => _lowResCache[id] = bytes);
+      });
+      return future;
+    });
+  }
+
+  /// Re-derive the adaptive preload depth from how fast the user is swiping
+  /// (Phase 2). Smooths the inter-swipe interval with an EMA so a single
+  /// outlier swipe doesn't whipsaw the depth, then targets a fixed decode
+  /// "runway" in wall-clock terms: depth = runway / interval. Clamped to
+  /// [_minPreloadAhead .. _maxPreloadAhead], the upper bound staying strictly
+  /// below _cacheWindow so eviction never drops a card we are about to show.
+  void _updatePreloadDepth() {
+    final now = DateTime.now();
+    final last = _lastSwipeAt;
+    _lastSwipeAt = now;
+    if (last == null) return;
+    final interval = now.difference(last).inMilliseconds.toDouble();
+    if (interval <= 0) return;
+    _avgSwipeIntervalMs = _avgSwipeIntervalMs == null
+        ? interval
+        : _avgSwipeIntervalMs! * 0.6 + interval * 0.4;
+    _preloadAhead = (_preloadRunwayMs / _avgSwipeIntervalMs!)
+        .ceil()
+        .clamp(_minPreloadAhead, _maxPreloadAhead);
+  }
+
+  /// Evict decoded thumbnails and strip-thumb futures outside the ±_cacheWindow
+  /// band around [_currentIndex]. Keeps memory flat over very long sessions
+  /// (Fix 1). Cheap: after the first eviction both maps stay bounded to roughly
+  /// the window size, so the removeWhere scans only a handful of entries.
+  ///
+  /// The kept band is strictly wider than the preload-ahead depth, so the
+  /// currently visible card and every card we are about to show are always
+  /// retained. In-flight `_thumbFutures` are left alone — they self-remove on
+  /// completion and are bounded by preload activity.
+  void _evictDistantThumbs() {
+    if (_items.isEmpty) return;
+    final lo = (_currentIndex - _cacheWindow).clamp(0, _items.length - 1);
+    final hi = (_currentIndex + _cacheWindow).clamp(0, _items.length - 1);
+    final keep = <String>{};
+    for (int i = lo; i <= hi; i++) {
+      keep.add(_items[i].asset.id);
+    }
+    _thumbCache.removeWhere((id, _) => !keep.contains(id));
+    _stripFutures.removeWhere((id, _) => !keep.contains(id));
+    // Low-res placeholders ride the same band so they stay bounded too.
+    _lowResCache.removeWhere((id, _) => !keep.contains(id));
+    _lowResFutures.removeWhere((id, _) => !keep.contains(id));
   }
 
   void _loadFileSize(int index) {
@@ -259,6 +384,37 @@ class _SwipeScreenState extends State<SwipeScreen> {
     });
   }
 
+  // ─── Dropped-input instrumentation (Fix 4) ─────────────────────────────────
+  // Fire-and-forget event recording where/why a swipe or tap was dropped or
+  // landed on a not-ready card. Converts PostHog's opaque rage-clicks into a
+  // measurable signal. Note: a dedicated 'zoomed' reason is intentionally not
+  // emitted from gestures — when the card is zoomed, SwipeCard removes its drag
+  // recognizers so InteractiveViewer can win the gesture arena, which means no
+  // swipe callback fires to hook into. We instead record `is_zoomed` on every
+  // ignored event so zoom-related friction is still visible in the data.
+  void _trackInputIgnored(
+    String reason, {
+    required int position,
+    required bool imageReady,
+    bool lowResShown = false,
+  }) {
+    unawaited(AnalyticsService.instance.track(
+      AnalyticsEvents.swipeInputIgnored,
+      properties: {
+        'position_in_session': position,
+        'card_image_ready': imageReady,
+        // Phase 2: even when the full thumb isn't ready, the user now sees an
+        // instant low-res placeholder rather than a spinner. This lets the
+        // dashboard separate "acted on a recognizable image" from "acted on a
+        // blank spinner" — the perceived-drop metric, not just full-decode lag.
+        'low_res_shown': lowResShown,
+        'is_zoomed': _isZoomed,
+        'reason': reason,
+        'mode': widget.mode.name,
+      },
+    ));
+  }
+
   // ─── Swipe decision ───────────────────────────────────────────────────────────
 
   void _decide(SwipeDecision decision) {
@@ -268,6 +424,22 @@ class _SwipeScreenState extends State<SwipeScreen> {
     _resetZoom();
 
     final positionBeforeSwipe = _currentIndex;
+
+    // Friction signal (Fix 4): the user committed a decision on a card whose
+    // full thumbnail had not finished decoding. Kept as-is so we can measure
+    // Phase 2's effect — but we now also record whether a low-res placeholder
+    // was on screen, so the count splits into "saw a sharp-enough image" vs
+    // the original "acted on a blank spinner". Fire-and-forget so it never
+    // adds UI-thread pressure.
+    final decidedId = _items[_currentIndex].asset.id;
+    if (_thumbCache[decidedId] == null) {
+      _trackInputIgnored(
+        'image_not_ready',
+        position: positionBeforeSwipe,
+        imageReady: false,
+        lowResShown: _lowResCache[decidedId] != null,
+      );
+    }
 
     setState(() {
       _items[_currentIndex].decision = decision;
@@ -302,10 +474,23 @@ class _SwipeScreenState extends State<SwipeScreen> {
     // Keep the strip centred on the new card
     _scrollStripToIndex(_currentIndex);
 
-    // Preload ahead
-    _preloadThumb(_currentIndex + 2);
+    // Re-derive how far to look ahead from the user's current swipe cadence
+    // (Phase 2). Fast bursts widen the lead so full decodes keep up.
+    _updatePreloadDepth();
+
+    // Preload the new current card plus _preloadAhead more (Fix 2 + Phase 2).
+    // Each call is a no-op if already cached or in flight, so re-requesting the
+    // current card is free. Low-res first so the placeholder is ready instantly;
+    // decoding happens off the UI thread inside photo_manager.
+    for (int i = _currentIndex; i <= _currentIndex + _preloadAhead; i++) {
+      _preloadLowRes(i);
+      _preloadThumb(i);
+    }
     _loadFileSize(_currentIndex);
     _loadFileSize(_currentIndex + 1);
+
+    // Release thumbnails left far behind (Fix 1).
+    _evictDistantThumbs();
   }
 
   /// Jump directly to [index] without swiping through intermediate cards.
@@ -319,9 +504,13 @@ class _SwipeScreenState extends State<SwipeScreen> {
       _cardKey++;
     });
     _scrollStripToIndex(index);
-    _preloadThumb(index + 1);
+    for (int i = index; i <= index + _preloadAhead; i++) {
+      _preloadLowRes(i);
+      _preloadThumb(i);
+    }
     _loadFileSize(index);
     _loadFileSize(index + 1);
+    _evictDistantThumbs();
   }
 
   /// Smoothly scrolls the thumbnail strip so that [index] is centred in the
@@ -491,6 +680,14 @@ class _SwipeScreenState extends State<SwipeScreen> {
                     _leftHanded ? SwipeDecision.keep : SwipeDecision.delete),
                 onSwipeRight: () => _decide(
                     _leftHanded ? SwipeDecision.delete : SwipeDecision.keep),
+                onInputIgnored: (reason) => _trackInputIgnored(
+                  reason,
+                  position: _currentIndex,
+                  imageReady:
+                      _thumbCache[_items[_currentIndex].asset.id] != null,
+                  lowResShown:
+                      _lowResCache[_items[_currentIndex].asset.id] != null,
+                ),
                 child: _buildMediaCard(_items[_currentIndex]),
               ),
             ),
@@ -563,29 +760,48 @@ class _SwipeScreenState extends State<SwipeScreen> {
       ],
     );
 
+    // Last-resort spinner — only reached when neither the full thumb nor the
+    // tiny low-res placeholder has decoded yet. With low-res pre-warming this
+    // is rare and brief; the goal is that a card never blocks a swipe on a
+    // full decode (Phase 2).
+    Widget spinner() => Container(
+          color: const Color(0xFF1C1C1E),
+          child: const Center(
+            child: CircularProgressIndicator(
+              color: Color(0xFF6B4EFF),
+              strokeWidth: 2,
+            ),
+          ),
+        );
+
     Widget imageWidget;
     if (cached != null) {
       imageWidget = imageLayer(cached);
     } else {
+      // Progressive load: show the full thumb the instant it's ready, otherwise
+      // the low-res placeholder, otherwise (briefly) a spinner. gaplessPlayback
+      // makes the low-res → full swap seamless.
+      final lowCached = _lowResCache[id];
       imageWidget = FutureBuilder<Uint8List?>(
         future: _thumbFutures[id] ??
             item.asset.thumbnailDataWithSize(
-              ThumbnailSize(900, 1200),
-              quality: 92,
+              ThumbnailSize(_cardThumbW, _cardThumbH),
+              quality: _cardThumbQuality,
             ),
-        builder: (_, snap) {
-          if (snap.hasData && snap.data != null) {
-            _thumbCache[id] = snap.data;
-            return imageLayer(snap.data!);
+        builder: (_, fullSnap) {
+          if (fullSnap.hasData && fullSnap.data != null) {
+            _thumbCache[id] = fullSnap.data;
+            return imageLayer(fullSnap.data!);
           }
-          return Container(
-            color: const Color(0xFF1C1C1E),
-            child: const Center(
-              child: CircularProgressIndicator(
-                color: Color(0xFF6B4EFF),
-                strokeWidth: 2,
-              ),
-            ),
+          if (lowCached != null) return imageLayer(lowCached);
+          return FutureBuilder<Uint8List?>(
+            future: _ensureLowResFuture(item),
+            builder: (_, lowSnap) {
+              if (lowSnap.hasData && lowSnap.data != null) {
+                return imageLayer(lowSnap.data!);
+              }
+              return spinner();
+            },
           );
         },
       );

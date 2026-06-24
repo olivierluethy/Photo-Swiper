@@ -100,6 +100,30 @@ class AnalyticsEvents {
   //     'position_in_session'  int — 0-based index of the card swiped.
   //     'mode'                 'month' | 'today' | 'random'
   static const String swipePerformed = 'swipe_performed';
+  // swipe_input_ignored
+  //   Fires when a user's swipe/tap on the card is dropped or lands on a
+  //   not-yet-ready card — the precise, measurable counterpart to PostHog's
+  //   opaque "rage click" autocapture (which only reports screen_name).
+  //   Fire-and-forget; emitted from the swipe flow only.
+  //   Properties:
+  //     'position_in_session'  int — 0-based index of the card in view.
+  //     'card_image_ready'     bool — was the full card thumbnail decoded
+  //                            and cached when the input arrived?
+  //     'low_res_shown'        bool — was the instant low-res placeholder on
+  //                            screen when the input arrived? Splits an
+  //                            'image_not_ready' into "acted on a sharp-enough
+  //                            image" (true) vs "acted on a blank spinner"
+  //                            (false) — the perceived-drop metric for the
+  //                            progressive-image work.
+  //     'is_zoomed'            bool — was the card zoomed in at the time?
+  //     'reason'               'locked'          — input arrived during the
+  //                                                fly-off commit animation
+  //                            'image_not_ready' — card decided while its
+  //                                                thumbnail was still loading
+  //                            'zoomed'           — reserved (see swipe_screen
+  //                                                docs for why gesture-arena
+  //                                                rules make this hard to emit)
+  static const String swipeInputIgnored = 'swipe_input_ignored';
   static const String cleanupPaused = 'cleanup_paused';
   static const String cleanupReviewOpened = 'cleanup_review_opened';
   static const String cleanupConfirmed = 'cleanup_confirmed';
