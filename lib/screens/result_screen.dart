@@ -64,6 +64,9 @@ class _ResultScreenState extends State<ResultScreen>
 
   bool get _hasResult => widget.deletedCount > 0;
 
+  /// Clears the session stack back to the home grid. The home screen
+  /// restores the year the user last selected, so they land back in the year
+  /// they were working through rather than on the current one.
   void _goHome() {
     Navigator.pushNamedAndRemoveUntil(
       context,
@@ -191,20 +194,10 @@ class _ResultScreenState extends State<ResultScreen>
                       elevation: 0,
                     ),
                     child: const Text(
-                      'Back to Home',
+                      'Clean another month',
                       style: TextStyle(
                           fontSize: 17, fontWeight: FontWeight.w600),
                     ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => Navigator.pushNamedAndRemoveUntil(
-                      context, '/home', (r) => false),
-                  child: const Text(
-                    'Clean another month',
-                    style: TextStyle(
-                        color: Color(0xFF8E8E93), fontSize: 15),
                   ),
                 ),
                 const SizedBox(height: 16),

@@ -9,6 +9,26 @@ import 'swipe_screen.dart';
 import 'grid_select_screen.dart';
 import 'settings_screen.dart';
 
+/// Picks which year the home screen opens on.
+///
+/// Precedence: the year the user last selected, then the current year, then
+/// the earliest year with media. The remembered year is skipped when it no
+/// longer appears in [availableYears] — e.g. the user deleted every photo in
+/// it — so the last two branches preserve the original behaviour exactly.
+///
+/// [availableYears] must not be empty.
+int resolveInitialYear({
+  required List<int> availableYears,
+  required int? rememberedYear,
+  required int currentYear,
+}) {
+  if (rememberedYear != null && availableYears.contains(rememberedYear)) {
+    return rememberedYear;
+  }
+  if (availableYears.contains(currentYear)) return currentYear;
+  return availableYears.first;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -93,9 +113,13 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {
       _years = years;
-      _selectedYear = years.contains(DateTime.now().year)
-          ? DateTime.now().year
-          : years.first;
+      // Deliberately not written back to prefs: only an explicit tap records
+      // a year, so falling back never overwrites a deliberate choice.
+      _selectedYear = resolveInitialYear(
+        availableYears: years,
+        rememberedYear: PreferencesService.instance.lastSelectedYear,
+        currentYear: DateTime.now().year,
+      );
       _loadingYears = false;
     });
     _loadMonthCounts();
@@ -145,6 +169,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (year == _selectedYear) return;
     HapticFeedback.selectionClick();
     setState(() => _selectedYear = year);
+    unawaited(PreferencesService.instance.setLastSelectedYear(year));
     _loadMonthCounts();
   }
 

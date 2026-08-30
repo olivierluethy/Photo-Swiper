@@ -15,6 +15,7 @@ class PreferencesService {
   static const _keyShowCompletedMonths = 'show_completed_months';
   static const _keyMonthSortMode = 'month_sort_mode';
   static const _keyLastNewlyCompleted = 'last_newly_completed_month';
+  static const _keyLastSelectedYear = 'last_selected_year';
 
   late SharedPreferences _prefs;
 
@@ -137,6 +138,20 @@ class PreferencesService {
 
   Future<void> setMonthSortMode(MonthSort mode) =>
       _prefs.setInt(_keyMonthSortMode, mode.index);
+
+  // ─── Last selected year ───────────────────────────────────────────────────
+  //
+  // Recorded whenever the user taps a year chip on the home screen, so the
+  // grid reopens on the year they were last working in — after finishing a
+  // cleanup session, after backing out of a month, and after a relaunch.
+  //
+  // Nullable on purpose: "never picked a year" and "picked the current year"
+  // are different states, and only the former should defer to the
+  // current-year default in `resolveInitialYear`.
+  int? get lastSelectedYear => _prefs.getInt(_keyLastSelectedYear);
+
+  Future<void> setLastSelectedYear(int year) =>
+      _prefs.setInt(_keyLastSelectedYear, year);
 }
 
 /// Ordering / filtering modes for the home-screen month grid.
